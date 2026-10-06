@@ -1,0 +1,8 @@
+[project]
+name = "gnomica-cdd-backup-script"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "google-cloud-storage>=3.16.0",
+    "requests>=2.34.2",
+]
