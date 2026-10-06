@@ -1,6 +1,6 @@
 """
-CDD Vault backup: exports data from Collaborative Drug Discovery and streams it
-to Google Cloud Storage (or a local folder when testing).
+CDD Vault backup: exports data from Collaborative Drug Discovery and streams it,
+gzip-compressed, to Google Cloud Storage (or a local folder when testing).
 
 Config (environment variables):
   CDD_API_TOKEN     required  CDD API token (from Secret Manager in Cloud Run)
@@ -10,15 +10,18 @@ Config (environment variables):
   EXPORTS           comma-separated list of exports (default: molecules,batches)
   CDD_BASE_URL      API base URL (default: https://eu.collaborativedrug.com/api/v1)
 
-Each successful export is followed by a small "<file>.done" marker object. A
-backup file WITHOUT its .done marker is a partial: usable for salvage only.
-The job needs only create permission on the bucket (roles/storage.objectCreator).
+Each export is saved as "<name>.json.gz". After it is fully stored, a small
+"<name>.json.gz.done" marker is written. A backup file WITHOUT its .done marker
+is a partial: usable for salvage only. The job needs only create permission on
+the bucket (roles/storage.objectCreator).
 
-NOTE: Verify the export endpoints and response fields against the CDD Vault API
-docs for your account. The async flow (start -> poll progress -> download) is
-the documented pattern, but field names can differ between export types.
+Note: the backup only contains what the token's user can see. Make sure the
+backup user is a member of ALL projects in the vault.
+
+API reference: https://docs.collaborativedrug.com/
 """
 
+import gzip
 import logging
 import os
 import signal
@@ -30,17 +33,20 @@ from datetime import UTC, datetime
 
 import requests
 
+# Direct all log formatters to use UTC (gmtime) instead of local time
+logging.Formatter.converter = time.gmtime
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("cdd-backup")
 
 BASE_URL = os.environ.get(
     "CDD_BASE_URL", "https://eu.collaborativedrug.com/api/v1"
 ).rstrip("/")
-POLL_INTERVAL_SECONDS = 15
+POLL_INTERVAL_SECONDS = 10  # CDD suggests polling every 5-10 seconds
+MAX_POLL_ERRORS = 5  # consecutive failed status checks tolerated before giving up
 HEARTBEAT_SECONDS = 5 * 60  # log a progress line at most this often while waiting
 EXPORT_TIMEOUT_SECONDS = 2 * 60 * 60  # give up on a single export after 2 hours
-MIN_FILE_BYTES = 100  # anything smaller is treated as a failed/empty export
 CHUNK_SIZE = 8 * 1024 * 1024
+FAILED_STATUSES = {"failed", "error", "canceled", "cancelled"}
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,13 @@ def _handle_sigterm(signum, frame):
     raise KeyboardInterrupt("SIGTERM received")
 
 
+def _retry_delay(resp, attempt):
+    try:
+        return int(resp.headers["Retry-After"])
+    except KeyError, ValueError:  # missing, or an HTTP date instead of seconds
+        return 2**attempt
+
+
 def request_with_retry(session, method, url, max_attempts=5, **kwargs):
     """HTTP request with exponential backoff on 429 and 5xx responses."""
     for attempt in range(1, max_attempts + 1):
@@ -108,7 +121,7 @@ def request_with_retry(session, method, url, max_attempts=5, **kwargs):
         if resp.status_code == 429 or resp.status_code >= 500:
             if attempt == max_attempts:
                 resp.raise_for_status()
-            wait = int(resp.headers.get("Retry-After", 2**attempt))
+            wait = _retry_delay(resp, attempt)
             log.warning(
                 "HTTP %d. Retry %d/%d in %ds",
                 resp.status_code,
@@ -159,17 +172,10 @@ def open_destination(cfg, object_name):
 
 
 def start_export(session, cfg, name):
-    """Ask CDD to start an async export and return its id."""
+    """Ask CDD to start an async export (POST /<name>/query) and return its id."""
     log.info("[%s] Starting export", name)
     resp = request_with_retry(
-        session,
-        "GET",
-        f"{cfg.vault_url}/{name}",
-        params={
-            "async": "true",
-            # TODO: REMOVE THIS!
-            "modified_after": "2026-06-27T00:00:00Z",
-        },
+        session, "POST", f"{cfg.vault_url}/{name}/query", json={"async": True}
     )
     export_id = resp.json()["id"]
     log.info("[%s] Export started (id=%s)", name, export_id)
@@ -181,14 +187,33 @@ def wait_for_export(session, cfg, name, export_id):
     started = time.time()
     last_status = None
     last_log = started
+    poll_errors = 0
 
     while True:
-        progress = request_with_retry(
-            session, "GET", f"{cfg.vault_url}/export_progress/{export_id}"
-        ).json()
+        try:
+            progress = request_with_retry(
+                session, "GET", f"{cfg.vault_url}/export_progress/{export_id}"
+            ).json()
+            poll_errors = 0
+        except requests.RequestException:
+            # One flaky status check shouldn't abort an export that may be an hour in
+            poll_errors += 1
+            if poll_errors >= MAX_POLL_ERRORS:
+                raise
+            log.warning(
+                "[%s] Status check failed (%d/%d), will retry",
+                name,
+                poll_errors,
+                MAX_POLL_ERRORS,
+                exc_info=True,
+            )
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
         status = progress.get("status")
 
-        # Log on status changes plus a periodic heartbeat, not on every poll
+        # Log on status changes (this also surfaces unexpected statuses) plus a
+        # periodic heartbeat, not on every poll
         now = time.time()
         if status != last_status or now - last_log >= HEARTBEAT_SECONDS:
             log.info(
@@ -201,40 +226,61 @@ def wait_for_export(session, cfg, name, export_id):
 
         if status == "finished":
             return
-        if status in ("failed", "error"):
+        if status in FAILED_STATUSES:
             raise RuntimeError(f"[{name}] Export failed: {progress}")
         if now - started > EXPORT_TIMEOUT_SECONDS:
-            raise TimeoutError(f"[{name}] Export did not finish in time")
+            raise TimeoutError(
+                f"[{name}] Export did not finish in time (last status: {status})"
+            )
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def check_json_complete(name, size, first, last):
+    """Cheap truncation check: a complete JSON document starts with { or [ and ends with } or ]."""
+    if first not in (b"{", b"[") or last not in (b"}", b"]"):
+        raise RuntimeError(
+            f"[{name}] Export does not look like complete JSON (starts {first!r}, ends {last!r})"
+        )
+
+
 def download_export(session, cfg, name, export_id, object_name):
-    """Stream the finished export straight to its destination, then write the .done marker."""
+    """Stream the finished export, gzip it on the fly, store it, then write the .done marker."""
     log.info("[%s] Downloading", name)
-    total = 0
+    raw_bytes = 0
+    first = last = b""
+
+    # Exit order is reversed: gzip finishes first (writes its trailer), then the destination closes
     with (
         request_with_retry(
             session, "GET", f"{cfg.vault_url}/exports/{export_id}", stream=True
         ) as dl,
         open_destination(cfg, object_name) as out,
+        gzip.GzipFile(fileobj=out, mode="wb") as gz,
     ):
         for chunk in dl.iter_content(chunk_size=CHUNK_SIZE):
-            out.write(chunk)
-            total += len(chunk)
-        if total < MIN_FILE_BYTES:
-            raise RuntimeError(f"[{name}] Export suspiciously small ({total} bytes)")
+            gz.write(chunk)
+            raw_bytes += len(chunk)
+            # Set first only on first loop
+            if not first:
+                first = chunk[:1024].lstrip()[:1]
+            tail = chunk[-1024:].rstrip()[-1:]
+            # Set every loop, but we only want the last value
+            if tail:
+                last = tail
+        check_json_complete(name, raw_bytes, first, last)
 
     # Only written once the file is fully stored: its presence means "complete".
     with open_destination(cfg, object_name + ".done") as marker:
-        marker.write(f"{total} bytes\n".encode())
-    log.info("[%s] Done: %.1f MB", name, total / 1e6)
+        marker.write(f"{raw_bytes} bytes uncompressed\n".encode())
+    log.info("[%s] Done: %.1f MB uncompressed", name, raw_bytes / 1e6)
 
 
-def cancel_export(session, export_id):
+def cancel_export(session, cfg, export_id):
     """Best-effort cancel of a CDD export. Must never raise: we may be mid-shutdown."""
     try:
         # Short timeout: after SIGTERM we only have ~10 seconds in total.
-        resp = session.delete(f"{BASE_URL}/exports/{export_id}", timeout=5)
+        # CDD requires the export's own vault id in the URL for DELETE.
+        resp = session.delete(f"{cfg.vault_url}/exports/{export_id}", timeout=5)
         log.info("Cancel export %s -> HTTP %s", export_id, resp.status_code)
     except Exception:
         log.warning("Could not cancel export %s", export_id, exc_info=True)
@@ -246,8 +292,8 @@ def run_export(session, cfg, name, object_name):
         wait_for_export(session, cfg, name, export_id)
         download_export(session, cfg, name, export_id, object_name)
     except BaseException:
-        # Errors, timeouts and SIGTERM: don't leave a queue behind for the next run
-        cancel_export(session, export_id)
+        # Errors, timeouts and SIGTERM: don't leave an orphaned export in CDD's queue
+        cancel_export(session, cfg, export_id)
         raise
 
 
@@ -258,12 +304,12 @@ def main():
     session = requests.Session()
     session.headers.update({"X-CDD-Token": cfg.token})
 
-    # One folder per run, e.g. backups/2025-06-01T020000Z/vault-1234-molecules.gz
+    # One folder per run, e.g. backups/2025-06-01T020000Z/vault-1234-molecules.json.gz
     run_id = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
     failures = []
 
     for name in cfg.exports:
-        object_name = f"backups/{run_id}/vault-{cfg.vault_id}-{name}.gz"
+        object_name = f"backups/{run_id}/vault-{cfg.vault_id}-{name}.json.gz"
         try:
             run_export(session, cfg, name, object_name)
         except (
