@@ -1,0 +1,21 @@
+{
+  "displayName": "__DISPLAY_NAME__",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Scheduler error",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=\"__SCHEDULER_NAME__\" AND severity>=ERROR"
+      }
+    }
+  ],
+  "notificationChannels": ["__CHANNEL__"],
+  "alertStrategy": {
+    "notificationRateLimit": {"period": "3600s"},
+    "autoClose": "1800s"
+  },
+  "documentation": {
+    "content": "The weekly trigger for __JOB_NAME__ failed, so no backup was started. Check Cloud Scheduler and the run.invoker permission.",
+    "mimeType": "text/markdown"
+  }
+}

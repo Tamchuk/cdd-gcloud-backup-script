@@ -1,0 +1,24 @@
+{
+  "displayName": "__DISPLAY_NAME__",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Failed execution",
+      "conditionThreshold": {
+        "filter": "metric.type=\"run.googleapis.com/job/completed_execution_count\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"__JOB_NAME__\" AND metric.labels.result=\"failed\"",
+        "aggregations": [
+          {"alignmentPeriod": "600s", "perSeriesAligner": "ALIGN_DELTA"}
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s"
+      }
+    }
+  ],
+  "notificationChannels": ["__CHANNEL__"],
+  "alertStrategy": {"autoClose": "1800s"},
+  "documentation": {
+    "content": "The Cloud Run job __JOB_NAME__ ran and failed. Check its logs (make logs). A backup file without a .done marker is a partial.",
+    "mimeType": "text/markdown"
+  }
+}
