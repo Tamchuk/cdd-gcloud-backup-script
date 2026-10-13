@@ -6,3 +6,6 @@ venv/
 .venv/
 backups/
 .ruff_cache/
+alerts/
+Makefile
+config.mk

@@ -1,0 +1,6 @@
+.git
+.env
+config.mk
+backups/
+__pycache__/
+.venv/

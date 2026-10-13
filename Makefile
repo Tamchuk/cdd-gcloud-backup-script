@@ -6,6 +6,7 @@
 -include config.mk
 
 SHELL := /bin/bash
+.DEFAULT_GOAL := help
 .NOTPARALLEL:
 
 PROJECT_ID    ?= $(shell gcloud config get-value project 2>/dev/null)
