@@ -12,8 +12,12 @@ Config (environment variables):
   CDD_BASE_URL      API base URL (default: https://eu.collaborativedrug.com/api/v1)
 
 Each export is saved as "<name>.json.gz" ("<name>.zip" for ELN). After it is
-fully stored, a small "<name>.json.gz.done" marker is written. A backup file WITHOUT its .done marker
-is a partial: usable for salvage only. The job needs create and read permission
+fully stored, a small "<name>.json.gz.done" marker is written. A backup file
+WITHOUT its .done marker is a partial: usable for salvage only.
+
+Attached/source files are downloaded in every run to "<run>/files/<id>-<name>",
+so each run folder is self-contained. "<run>/vault-<id>-files.json.gz" lists
+them and is written (with its marker) only once all files are stored. The job needs create and read permission
 on the bucket (roles/storage.objectCreator + roles/storage.objectViewer), no delete.
 
 At the end of every run one JSON summary line (event "backup_summary") is logged:
@@ -26,11 +30,14 @@ backup user is a member of ALL projects in the vault.
 API reference: https://docs.collaborativedrug.com/
 """
 
+import base64
 import glob
 import gzip
 import json
 import logging
 import os
+import posixpath
+import re
 import signal
 import sys
 import time
@@ -38,6 +45,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import ijson
 import requests
 
 # Direct all log formatters to use UTC (gmtime) instead of local time
@@ -82,10 +90,16 @@ EXPORT_SOURCES = {
     "inventory_samples": ("get", "inventory_samples"),  # needs inventory enabled
     "control_layouts": ("get", "control_layouts"),
     "eln": ("post", "eln/entries/query"),  # a zip; Vault Administrators only
+    # Attached and source files referenced by the records above, all of them in
+    # every run (so each run folder is self-contained). Always runs last
+    "files": ("files", "files"),
 }
 ADMIN_ONLY = {"users", "eln"}
 ZIP_EXPORTS = {"eln"}
 DEFAULT_EXPORTS = [n for n in EXPORT_SOURCES if n not in ADMIN_ONLY]
+# Exports whose records list "source_files"/"attached_files" ({"id", "name"})
+FILE_REF_EXPORTS = ["molecules", "batches", "protocols", "runs"]
+FILE_REF_KEYS = {"source_files", "attached_files"}
 
 
 @dataclass(frozen=True)
@@ -120,6 +134,8 @@ class Config:
             raise RuntimeError(
                 f"Unknown export(s): {', '.join(unknown)}. Known: {', '.join(EXPORT_SOURCES)}"
             )
+        # files reads the other exports of the run, so it goes last
+        exports.sort(key=lambda e: e == "files")
         return cls(token, vault_id, exports, bucket, local_dir)
 
 
@@ -183,15 +199,16 @@ def request_with_retry(session, method, url, max_attempts=5, **kwargs):
 
 
 @contextmanager
-def _open_local(path):
+def _open_local(path, quiet):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as out:
         yield out
-    log.info("Saved locally: %s", path)
+    if not quiet:
+        log.info("Saved locally: %s", path)
 
 
 @contextmanager
-def _open_gcs(bucket_name, object_name):
+def _open_gcs(bucket_name, object_name, quiet):
     from google.cloud import (
         storage,
     )  # imported here so local testing doesn't need GCP libraries
@@ -199,13 +216,32 @@ def _open_gcs(bucket_name, object_name):
     blob = storage.Client().bucket(bucket_name).blob(object_name)
     with blob.open("wb") as out:
         yield out
-    log.info("Uploaded: gs://%s/%s", bucket_name, object_name)
+    if not quiet:
+        log.info("Uploaded: gs://%s/%s", bucket_name, object_name)
 
 
-def open_destination(cfg, object_name):
+def open_destination(cfg, object_name, quiet=False):
+    """quiet: don't log each object (attached files: hundreds per run)."""
     if cfg.local_dir:
-        return _open_local(os.path.join(cfg.local_dir, object_name))
-    return _open_gcs(cfg.bucket, object_name)
+        return _open_local(os.path.join(cfg.local_dir, object_name), quiet)
+    return _open_gcs(cfg.bucket, object_name, quiet)
+
+
+def open_stored(cfg, object_name):
+    """Read back an object this run already stored (binary, as stored)."""
+    if cfg.local_dir:
+        return open(os.path.join(cfg.local_dir, object_name), "rb")
+    from google.cloud import storage
+
+    return storage.Client().bucket(cfg.bucket).blob(object_name).open("rb")
+
+
+def is_stored(cfg, object_name):
+    if cfg.local_dir:
+        return os.path.exists(os.path.join(cfg.local_dir, object_name))
+    from google.cloud import storage
+
+    return storage.Client().bucket(cfg.bucket).blob(object_name).exists()
 
 
 # --- CDD export steps -------------------------------------------------------
@@ -378,13 +414,97 @@ def cancel_export(session, cfg, export_id):
         log.warning("Could not cancel export %s", export_id, exc_info=True)
 
 
+# --- Attached and source files ----------------------------------------------
+# There is no "list all files" endpoint: file ids come from the records this run
+# already stored. All of them are downloaded every run, into the run's folder.
+
+
+def referenced_files(cfg, run_dir):
+    """{file_id: name} for every source/attached file in this run's stored exports."""
+    found = {}
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in FILE_REF_KEYS and isinstance(child, list):
+                    for f in child:
+                        found[f["id"]] = f.get("name") or str(f["id"])
+                else:
+                    walk(child)  # e.g. protocols list their runs, which list files
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    for name in FILE_REF_EXPORTS:
+        object_name = f"{run_dir}/vault-{cfg.vault_id}-{name}.json.gz"
+        if not is_stored(cfg, object_name + ".done"):
+            # Not exported (or failed) in this run: its files can't be found
+            log.warning("[files] %s not in this run, its files are skipped", name)
+            continue
+        with open_stored(cfg, object_name) as raw, gzip.GzipFile(fileobj=raw) as gz:
+            for record in ijson.items(gz, "objects.item", use_float=True):
+                walk(record)
+    return found
+
+
+def backup_files(session, cfg, name, object_name):
+    """Download every referenced file, then write the list of files and its .done marker.
+
+    The list ("<run>/vault-<id>-files.json.gz") is only written once every file
+    is stored, so its marker means "this run's files are complete".
+    """
+    run_dir = posixpath.dirname(object_name)
+    files = referenced_files(cfg, run_dir)
+    log.info("[files] %d files referenced, downloading", len(files))
+
+    listing, failed, total = [], [], 0
+    for file_id, file_name in sorted(files.items()):
+        safe = re.sub(r"[^\w.-]", "_", file_name)[:100]
+        stored = f"{run_dir}/files/{file_id}-{safe}"
+        try:
+            data = request_with_retry(
+                session, "GET", f"{cfg.vault_url}/files/{file_id}"
+            ).json()
+            content = base64.b64decode(data["contents"])
+            with open_destination(cfg, stored, quiet=True) as out:
+                out.write(content)
+        except Exception:
+            log.warning("[files] Could not back up file %s", file_id, exc_info=True)
+            failed.append(file_id)
+            continue
+        listing.append(
+            {"id": file_id, "name": file_name, "object": stored, "bytes": len(content)}
+        )
+        total += len(content)
+
+    if failed:
+        raise RuntimeError(
+            f"[files] {len(failed)} of {len(files)} files failed"
+            f" (e.g. {', '.join(map(str, failed[:5]))})"
+        )
+
+    # Same shape as the bulk exports, so verify_backup.py checks it the same way
+    raw = json.dumps({"count": len(listing), "objects": listing}).encode()
+    with (
+        open_destination(cfg, object_name) as out,
+        gzip.GzipFile(fileobj=out, mode="wb") as gz,
+    ):
+        gz.write(raw)
+    write_done_marker(cfg, name, object_name, len(raw))
+    return len(raw), f"{len(listing)} files, {_size(total)}"
+
+
 def run_export(session, cfg, name, object_name):
-    if EXPORT_SOURCES[name][0] == "sync":
-        return fetch_reference(session, cfg, name, object_name)
+    """Back up one export. Returns (uncompressed bytes, note for the summary)."""
+    how = EXPORT_SOURCES[name][0]
+    if how == "files":
+        return backup_files(session, cfg, name, object_name)
+    if how == "sync":
+        return fetch_reference(session, cfg, name, object_name), ""
     export_id = start_export(session, cfg, name)
     try:
         wait_for_export(session, cfg, name, export_id)
-        return download_export(session, cfg, name, export_id, object_name)
+        return download_export(session, cfg, name, export_id, object_name), ""
     except BaseException:
         # Errors, timeouts and SIGTERM: don't leave an orphaned export in CDD's queue
         cancel_export(session, cfg, export_id)
@@ -467,7 +587,7 @@ def _size(n):
 def log_summary(cfg, run_id, results, failures):
     """Log one structured summary line; a Cloud Monitoring alert emails it.
 
-    results: {name: (uncompressed bytes, stored bytes)} for successful exports.
+    results: {name: (uncompressed bytes, stored bytes, note)} for successful exports.
     """
     warnings = []
     try:
@@ -483,9 +603,11 @@ def log_summary(cfg, run_id, results, failures):
             lines.append(f"{name}: FAILED")
             warnings.append(f"{name} failed")
             continue
-        raw, gz = results[name]
+        raw, gz, note = results[name]
         stored_as = "zip" if name in ZIP_EXPORTS else "gz"
-        line = f"{name}: {_size(raw)} ({_size(gz)} {stored_as})"
+        # files: the note has the file count and size; raw is the size of its list
+        line = f"{name}: {note}, list" if note else f"{name}:"
+        line += f" {_size(raw)} ({_size(gz)} {stored_as})"
         if name in previous:
             prev_run, prev_raw = previous[name]
             diff = raw - prev_raw
@@ -534,8 +656,8 @@ def main():
         ext = ".zip" if name in ZIP_EXPORTS else ".json.gz"
         object_name = f"backups/{run_id}/vault-{cfg.vault_id}-{name}{ext}"
         try:
-            raw = run_export(session, cfg, name, object_name)
-            results[name] = (raw, stored_size(cfg, object_name))
+            raw, note = run_export(session, cfg, name, object_name)
+            results[name] = (raw, stored_size(cfg, object_name), note)
         except (
             Exception
         ):  # KeyboardInterrupt (SIGTERM) is NOT caught: it aborts the run

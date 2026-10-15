@@ -4,5 +4,6 @@ version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
     "google-cloud-storage>=3.16.0",
+    "ijson==3.6.0",
     "requests>=2.34.2",
 ]

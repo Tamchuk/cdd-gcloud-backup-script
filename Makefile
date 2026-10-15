@@ -18,6 +18,11 @@ SECRET_NAME   ?= cdd-api-token
 JOB_NAME      ?= cdd-backup
 SA_NAME       ?= cdd-backup-sa
 TASK_TIMEOUT  ?= 12h# ~8 bulk exports, each allowed up to 2 h by main.py
+MEMORY        ?= 2Gi# attached files are decoded in memory, one at a time
+# The verification job (verify_backup.py): same image, runs after the backup
+VERIFY_JOB_NAME ?= $(JOB_NAME)-verify
+MAX_AGE_DAYS    ?= 2# fail if the newest complete backup is older (Mon after a failed Mon backup: Fri's is ~3 days)
+VERIFY_MEMORY   ?= 2Gi# record ids kept for the link checks (grows with the vault)
 
 GCLOUD          = gcloud --project $(PROJECT_ID)
 SA              = $(SA_NAME)@$(PROJECT_ID).iam.gserviceaccount.com
@@ -26,8 +31,8 @@ COMPUTE_SA      = $(PROJECT_NUMBER)-compute@developer.gserviceaccount.com
 ME              = $(shell gcloud config get-value account 2>/dev/null)
 
 .PHONY: help setup apis bucket service-account secret iam builder-role \
-        deploy run executions logs list-backups local lint \
-        schedule schedule-run schedule-pause schedule-resume alerts
+        deploy deploy-verify run run-verify executions logs list-backups local verify lint \
+        schedule schedule-verify schedule-run schedule-pause schedule-resume alerts
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -91,10 +96,28 @@ deploy: require-PROJECT_ID require-REGION require-BUCKET_NAME require-CDD_VAULT_
 	  --set-secrets CDD_API_TOKEN=$(SECRET_NAME):latest \
 	  --set-env-vars "^@^CDD_VAULT_ID=$(CDD_VAULT_ID)@BUCKET_NAME=$(BUCKET_NAME)$(if $(EXPORTS),@EXPORTS=$(EXPORTS))" \
 	  --task-timeout $(TASK_TIMEOUT) \
+	  --memory $(MEMORY) \
+	  --max-retries 0
+
+deploy-verify: require-PROJECT_ID require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the verification job (no schedule)
+	@test -f Dockerfile || { echo "No Dockerfile here: run make from the project folder" >&2; exit 1; }
+	@# Same image and service account as the backup (it only reads the bucket and CDD)
+	$(GCLOUD) run jobs deploy $(VERIFY_JOB_NAME) \
+	  --source . \
+	  --region $(REGION) \
+	  --service-account $(SA) \
+	  --set-secrets CDD_API_TOKEN=$(SECRET_NAME):latest \
+	  --set-env-vars "CDD_VAULT_ID=$(CDD_VAULT_ID),BUCKET_NAME=$(BUCKET_NAME),MAX_AGE_DAYS=$(MAX_AGE_DAYS)" \
+	  --command python --args verify_backup.py \
+	  --task-timeout 1h \
+	  --memory $(VERIFY_MEMORY) \
 	  --max-retries 0
 
 run: require-PROJECT_ID require-REGION ## Execute the job once and wait for it to finish
 	$(GCLOUD) run jobs execute $(JOB_NAME) --region $(REGION) --wait
+
+run-verify: require-PROJECT_ID require-REGION ## Execute the verification job once and wait
+	$(GCLOUD) run jobs execute $(VERIFY_JOB_NAME) --region $(REGION) --wait
 
 executions: require-PROJECT_ID require-REGION ## List recent executions of the job
 	$(GCLOUD) run jobs executions list --job $(JOB_NAME) --region $(REGION)
@@ -112,31 +135,48 @@ local: require-CDD_VAULT_ID ## Run main.py locally into ./backups (needs CDD_API
 	@test -n "$$CDD_API_TOKEN" || { echo "Export CDD_API_TOKEN first" >&2; exit 1; }
 	CDD_VAULT_ID=$(CDD_VAULT_ID) EXPORTS=$(EXPORTS) LOCAL_OUTPUT_DIR=./backups python main.py
 
+verify: require-BUCKET_NAME require-CDD_VAULT_ID ## Check a stored backup locally (newest full run, or RUN=<run id>). Needs `gcloud auth application-default login` once
+	@# Live counts vs CDD only if CDD_API_TOKEN is exported in your shell
+	python verify_backup.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
+
 lint: ## Run ruff (check + format check)
 	ruff check . && ruff format --check .
 
-# --- Schedule (Sun + Wed) -----------------------------------------------------
+# --- Schedule (Mon-Fri) -------------------------------------------------------
 # Run `make deploy` and a successful manual `make run` before `make schedule`.
+# 02:00 Mon-Fri backs up the previous day, i.e. each Sun-Thu workday.
 
 SCHEDULER_REGION  ?= $(REGION)
-SCHEDULE          ?= 0 2 * * 0,3
+SCHEDULE          ?= 0 2 * * 1-5
 TIME_ZONE         ?= Asia/Jerusalem
 SCHEDULER_NAME    ?= $(JOB_NAME)-weekly
 SCHEDULER_SA_NAME ?= $(JOB_NAME)-scheduler-sa
 SCHEDULER_SA       = $(SCHEDULER_SA_NAME)@$(PROJECT_ID).iam.gserviceaccount.com
-JOB_RUN_URI        = https://$(REGION)-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$(PROJECT_ID)/jobs/$(JOB_NAME):run
+# Verification: 4 h after the backup starts (a full backup takes ~75 min)
+VERIFY_SCHEDULE        ?= 0 6 * * 1-5
+VERIFY_SCHEDULER_NAME  ?= $(VERIFY_JOB_NAME)-schedule
 
-schedule: require-PROJECT_ID require-REGION ## Create or update the Cloud Scheduler trigger (twice a week by default)
+# $(call schedule_job,<Cloud Run job>,<scheduler job name>,<cron schedule>)
+# Lets the scheduler's service account run the job, then creates or updates the trigger.
+define schedule_job
 	@$(GCLOUD) iam service-accounts describe $(SCHEDULER_SA) >/dev/null 2>&1 \
 	  || $(GCLOUD) iam service-accounts create $(SCHEDULER_SA_NAME)
-	$(GCLOUD) run jobs add-iam-policy-binding $(JOB_NAME) --region $(REGION) \
+	$(GCLOUD) run jobs add-iam-policy-binding $(1) --region $(REGION) \
 	  --member=serviceAccount:$(SCHEDULER_SA) --role=roles/run.invoker --format=none
-	@if $(GCLOUD) scheduler jobs describe $(SCHEDULER_NAME) --location $(SCHEDULER_REGION) >/dev/null 2>&1; then \
-	  echo "Updating scheduler job $(SCHEDULER_NAME)"; ACTION=update; else ACTION=create; fi; \
-	$(GCLOUD) scheduler jobs $$ACTION http $(SCHEDULER_NAME) --location $(SCHEDULER_REGION) \
-	  --schedule "$(SCHEDULE)" --time-zone "$(TIME_ZONE)" \
-	  --uri "$(JOB_RUN_URI)" --http-method POST \
+	@if $(GCLOUD) scheduler jobs describe $(2) --location $(SCHEDULER_REGION) >/dev/null 2>&1; then \
+	  echo "Updating scheduler job $(2)"; ACTION=update; else ACTION=create; fi; \
+	$(GCLOUD) scheduler jobs $$ACTION http $(2) --location $(SCHEDULER_REGION) \
+	  --schedule "$(3)" --time-zone "$(TIME_ZONE)" \
+	  --uri "https://$(REGION)-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$(PROJECT_ID)/jobs/$(1):run" \
+	  --http-method POST \
 	  --oauth-service-account-email $(SCHEDULER_SA)
+endef
+
+schedule: require-PROJECT_ID require-REGION ## Create or update the backup's Cloud Scheduler trigger (Mon-Fri 02:00 by default)
+	$(call schedule_job,$(JOB_NAME),$(SCHEDULER_NAME),$(SCHEDULE))
+
+schedule-verify: require-PROJECT_ID require-REGION ## Create or update the verification's trigger (4 h after each backup)
+	$(call schedule_job,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME),$(VERIFY_SCHEDULE))
 
 schedule-run: require-PROJECT_ID ## Trigger the Scheduler job now (tests the trigger and its permissions)
 	$(GCLOUD) scheduler jobs run $(SCHEDULER_NAME) --location $(SCHEDULER_REGION)
@@ -149,7 +189,8 @@ schedule-resume: require-PROJECT_ID ## Resume the scheduled trigger
 
 # --- Email alerts -------------------------------------------------------------
 # 1) the job ran and failed, 2) the Scheduler could not trigger the job,
-# 3) the summary after every run (sizes vs previous backup, WARNING if smaller).
+# 3) the summary after every run (sizes vs previous backup, WARNING if smaller),
+# 4) and 5) the same as 1) and 2) for the verification job.
 # Existing channels/policies are left alone; delete them in the console to recreate.
 # Uses `gcloud alpha`, which may offer to install the alpha component the first time.
 
@@ -158,12 +199,15 @@ ALERT_CHANNEL_NAME ?= $(JOB_NAME) alerts
 FAILED_ALERT_NAME   = $(JOB_NAME) failed
 SCHED_ALERT_NAME    = $(JOB_NAME) trigger failed
 SUMMARY_ALERT_NAME  = $(JOB_NAME) summary
+VERIFY_FAILED_ALERT_NAME = $(VERIFY_JOB_NAME) failed
+VERIFY_SCHED_ALERT_NAME  = $(VERIFY_JOB_NAME) trigger failed
 
 # Policy definitions live in alerts/*.json. __PLACEHOLDERS__ are filled in here.
-# $(call create_policy,<display name>,<template file>)
-create_policy = if [ -n "$$($(GCLOUD) alpha monitoring policies list --filter='displayName="$(1)"' --format='value(name)')" ]; then echo "Policy '$(1)' already exists, skipping"; else F=$$(mktemp); sed -e "s|__DISPLAY_NAME__|$(1)|" -e "s|__JOB_NAME__|$(JOB_NAME)|g" -e "s|__SCHEDULER_NAME__|$(SCHEDULER_NAME)|g" -e "s|__CHANNEL__|$$CH|" $(2) > $$F; $(GCLOUD) alpha monitoring policies create --policy-from-file=$$F; rm -f $$F; fi
+# $(call create_policy,<display name>,<template file>[,<job name>,<scheduler name>])
+# The job and scheduler names default to the backup's.
+create_policy = if [ -n "$$($(GCLOUD) alpha monitoring policies list --filter='displayName="$(1)"' --format='value(name)')" ]; then echo "Policy '$(1)' already exists, skipping"; else F=$$(mktemp); sed -e "s|__DISPLAY_NAME__|$(1)|" -e "s|__JOB_NAME__|$(or $(3),$(JOB_NAME))|g" -e "s|__SCHEDULER_NAME__|$(or $(4),$(SCHEDULER_NAME))|g" -e "s|__CHANNEL__|$$CH|" $(2) > $$F; $(GCLOUD) alpha monitoring policies create --policy-from-file=$$F; rm -f $$F; fi
 
-alerts: require-PROJECT_ID require-ALERT_EMAIL ## Create the email channel and the three alert policies (skips existing ones)
+alerts: require-PROJECT_ID require-ALERT_EMAIL ## Create the email channel and the five alert policies (skips existing ones)
 	@set -e; \
 	CH=$$($(GCLOUD) beta monitoring channels list --filter='displayName="$(ALERT_CHANNEL_NAME)"' --format='value(name)'); \
 	if [ -z "$$CH" ]; then \
@@ -171,4 +215,6 @@ alerts: require-PROJECT_ID require-ALERT_EMAIL ## Create the email channel and t
 	    --channel-labels=email_address=$(ALERT_EMAIL) --format='value(name)'); echo "Created channel $$CH"; fi; \
 	$(call create_policy,$(FAILED_ALERT_NAME),alerts/job-failed.json); \
 	$(call create_policy,$(SCHED_ALERT_NAME),alerts/scheduler-failed.json); \
-	$(call create_policy,$(SUMMARY_ALERT_NAME),alerts/backup-summary.json)
+	$(call create_policy,$(SUMMARY_ALERT_NAME),alerts/backup-summary.json); \
+	$(call create_policy,$(VERIFY_FAILED_ALERT_NAME),alerts/job-failed.json,$(VERIFY_JOB_NAME)); \
+	$(call create_policy,$(VERIFY_SCHED_ALERT_NAME),alerts/scheduler-failed.json,,$(VERIFY_SCHEDULER_NAME))

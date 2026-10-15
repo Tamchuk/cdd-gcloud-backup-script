@@ -10,6 +10,7 @@ google-crc32c==1.9.0
 google-resumable-media==2.11.0
 googleapis-common-protos==1.75.5
 idna==3.20
+ijson==3.6.0
 opentelemetry-api==1.45.0
 proto-plus==1.29.0
 protobuf==7.36.2
