@@ -1,0 +1,26 @@
+{
+  "displayName": "__DISPLAY_NAME__",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Backup summary",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"__JOB_NAME__\" AND jsonPayload.event=\"backup_summary\"",
+        "labelExtractors": {
+          "status": "EXTRACT(jsonPayload.status)",
+          "summary": "EXTRACT(jsonPayload.summary)"
+        }
+      }
+    }
+  ],
+  "notificationChannels": ["__CHANNEL__"],
+  "alertStrategy": {
+    "notificationRateLimit": {"period": "300s"},
+    "autoClose": "1800s"
+  },
+  "documentation": {
+    "subject": "CDD backup ${log.extracted_label.status}",
+    "content": "${log.extracted_label.summary}\n\nSizes are uncompressed and compared with the previous complete backup. A backup file without a .done marker is a partial.",
+    "mimeType": "text/markdown"
+  }
+}
