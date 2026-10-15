@@ -80,7 +80,7 @@ make setup           # APIs, bucket, service account, IAM, builder role (idempot
 make secret          # prompts for the CDD token and stores it in Secret Manager
 make deploy          # build from source and deploy the job (no schedule)
 make run             # execute the job once and wait
-make logs            # last week of job logs
+make logs            # last week of logs of both jobs, with the job name (JOB=backup|verify, LOG_LIMIT=100)
 make list-backups    # list objects in the bucket
 make schedule        # Cloud Scheduler trigger, Mon-Fri 02:00 (do this only after a good manual run).
                      # Its name stays cdd-backup-weekly: the trigger-failed alert filters on that name

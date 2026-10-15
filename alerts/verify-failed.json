@@ -18,7 +18,7 @@
   "notificationChannels": ["__CHANNEL__"],
   "alertStrategy": {"autoClose": "1800s"},
   "documentation": {
-    "content": "The Cloud Run job __JOB_NAME__ ran and failed. Check its logs (make logs). A backup file without a .done marker is a partial.",
+    "content": "The verification job __JOB_NAME__ found a problem with the newest backup (or could not run). See the FAIL lines in `make logs JOB=verify`; the last line counts passed, warnings and failed checks. A FAIL on \"age\" means no complete backup was made recently: check the backup job's own emails and `make executions`.",
     "mimeType": "text/markdown"
   }
 }

@@ -122,9 +122,13 @@ run-verify: require-PROJECT_ID require-REGION ## Execute the verification job on
 executions: require-PROJECT_ID require-REGION ## List recent executions of the job
 	$(GCLOUD) run jobs executions list --job $(JOB_NAME) --region $(REGION)
 
-logs: require-PROJECT_ID ## Show the last week of job logs (newest first)
-	$(GCLOUD) logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="$(JOB_NAME)"' \
-	  --limit 100 --freshness 7d --format='value(timestamp,textPayload)'
+LOG_LIMIT ?= 100
+
+logs: require-PROJECT_ID ## Last week of logs of both jobs, newest first (JOB=backup or JOB=verify for one; LOG_LIMIT=100)
+	@# jsonPayload.message is the backup summary (logged as JSON); everything else is textPayload
+	@# (textPayload:* OR jsonPayload.message:*) drops Cloud Run's own events, which have no text
+	$(GCLOUD) logging read 'resource.type="cloud_run_job" AND resource.labels.job_name=($(if $(filter verify,$(JOB)),,"$(JOB_NAME)") $(if $(JOB),,OR) $(if $(filter backup,$(JOB)),,"$(VERIFY_JOB_NAME)")) AND (textPayload:* OR jsonPayload.message:*)' \
+	  --limit $(LOG_LIMIT) --freshness 7d --format='value(timestamp,resource.labels.job_name,textPayload,jsonPayload.message)'
 
 list-backups: require-PROJECT_ID require-BUCKET_NAME ## List the files in the backup bucket
 	$(GCLOUD) storage ls -l "gs://$(BUCKET_NAME)/backups/**"
@@ -203,6 +207,8 @@ VERIFY_FAILED_ALERT_NAME = $(VERIFY_JOB_NAME) failed
 VERIFY_SCHED_ALERT_NAME  = $(VERIFY_JOB_NAME) trigger failed
 
 # Policy definitions live in alerts/*.json. __PLACEHOLDERS__ are filled in here.
+# backup-failed.json and verify-failed.json share the same condition (only the email
+# text differs): keep their "conditions" blocks identical when changing one.
 # $(call create_policy,<display name>,<template file>[,<job name>,<scheduler name>])
 # The job and scheduler names default to the backup's.
 create_policy = if [ -n "$$($(GCLOUD) alpha monitoring policies list --filter='displayName="$(1)"' --format='value(name)')" ]; then echo "Policy '$(1)' already exists, skipping"; else F=$$(mktemp); sed -e "s|__DISPLAY_NAME__|$(1)|" -e "s|__JOB_NAME__|$(or $(3),$(JOB_NAME))|g" -e "s|__SCHEDULER_NAME__|$(or $(4),$(SCHEDULER_NAME))|g" -e "s|__CHANNEL__|$$CH|" $(2) > $$F; $(GCLOUD) alpha monitoring policies create --policy-from-file=$$F; rm -f $$F; fi
@@ -213,8 +219,8 @@ alerts: require-PROJECT_ID require-ALERT_EMAIL ## Create the email channel and t
 	if [ -z "$$CH" ]; then \
 	  CH=$$($(GCLOUD) beta monitoring channels create --display-name="$(ALERT_CHANNEL_NAME)" --type=email \
 	    --channel-labels=email_address=$(ALERT_EMAIL) --format='value(name)'); echo "Created channel $$CH"; fi; \
-	$(call create_policy,$(FAILED_ALERT_NAME),alerts/job-failed.json); \
+	$(call create_policy,$(FAILED_ALERT_NAME),alerts/backup-failed.json); \
 	$(call create_policy,$(SCHED_ALERT_NAME),alerts/scheduler-failed.json); \
 	$(call create_policy,$(SUMMARY_ALERT_NAME),alerts/backup-summary.json); \
-	$(call create_policy,$(VERIFY_FAILED_ALERT_NAME),alerts/job-failed.json,$(VERIFY_JOB_NAME)); \
-	$(call create_policy,$(VERIFY_SCHED_ALERT_NAME),alerts/scheduler-failed.json,,$(VERIFY_SCHEDULER_NAME))
+	$(call create_policy,$(VERIFY_FAILED_ALERT_NAME),alerts/verify-failed.json,$(VERIFY_JOB_NAME)); \
+	$(call create_policy,$(VERIFY_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME))

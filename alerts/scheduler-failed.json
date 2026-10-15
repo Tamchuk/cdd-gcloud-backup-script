@@ -15,7 +15,7 @@
     "autoClose": "1800s"
   },
   "documentation": {
-    "content": "The weekly trigger for __JOB_NAME__ failed, so no backup was started. Check Cloud Scheduler and the run.invoker permission.",
+    "content": "The Cloud Scheduler trigger __SCHEDULER_NAME__ could not start the job __JOB_NAME__, so that run did not happen. Check the trigger in Cloud Scheduler and that its service account has run.invoker on the job (`make schedule` / `make schedule-verify` set both up again). `make executions` shows whether a backup ran; `make logs` shows both jobs.",
     "mimeType": "text/markdown"
   }
 }
