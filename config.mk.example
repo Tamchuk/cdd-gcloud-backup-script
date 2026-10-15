@@ -1,0 +1,37 @@
+# Copy to config.mk (it is git-ignored) and fill in your values:
+#   cp config.mk.example config.mk
+# Make reads config.mk as code, so keep it to simple NAME = value lines.
+# **NEVER** put the CDD token here: it lives in Secret Manager (`make secret`).
+
+# --- Required ------------------------------------------------------------------
+PROJECT_ID   = my-gcp-project-id
+# Region for the bucket, the jobs and the schedules. The bucket's location can't
+# be changed later: pick one your data-residency rules allow.
+REGION       = europe-west1
+BUCKET_NAME  = my-org-cdd-backups
+# Numeric vault id (the number in the CDD web app's URL, /vaults/<id>/)
+CDD_VAULT_ID = 1234
+# Where alert and summary emails go (`make alerts`)
+ALERT_EMAIL  = backups-owner@example.com
+
+# --- Optional (defaults shown) --------------------------------------------------
+# What to back up. Unset = everything except the Vault-Administrator-only ones.
+# Add eln,users if the token's user is a Vault Administrator. For a quick test:
+# EXPORTS      = molecules
+
+# When (cron, in TIME_ZONE). Default: Mon-Fri 02:00, i.e. after each Sun-Thu workday.
+# SCHEDULE        = 0 2 * * 1-5
+# VERIFY_SCHEDULE = 0 6 * * 1-5
+# TIME_ZONE       = Asia/Jerusalem
+# The verification fails if the newest complete backup is older than this (days)
+# MAX_AGE_DAYS    = 2
+
+# Cloud Run sizes. MEMORY must hold the largest attached file ~3 times over.
+# MEMORY        = 2Gi
+# VERIFY_MEMORY = 2Gi
+# TASK_TIMEOUT  = 12h
+
+# Names (change only if you run several copies in one project)
+# JOB_NAME    = cdd-backup
+# SA_NAME     = cdd-backup-sa
+# SECRET_NAME = cdd-api-token

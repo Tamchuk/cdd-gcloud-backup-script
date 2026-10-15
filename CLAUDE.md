@@ -10,6 +10,7 @@ Failures email the owner via Cloud Monitoring alerts.
 
 | File | Purpose |
 |---|---|
+| `README.md` | For people operating this (not Claude): emails and what to do, new computer, access, routine tasks. **Update it when commands, schedules, emails or setup steps change** |
 | `main.py` | The backup: start export -> poll -> stream to GCS, gzip on the fly; then reference data and files; then the summary |
 | `verify_backup.py` | Restore check of a stored run (see "Verification" below). Imports the export table and helpers from `main.py` |
 | `Dockerfile` | Required. Without it, `--source .` falls back to buildpacks, which start a web server and the job dies with exit code 127. Runs as non-root user `app` |
@@ -134,6 +135,9 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
 - Summary alert verified 2026-10-15 (OK and WARNING emails received; subject is
   `[ALERT - No severity] CDD backup <status>`). An 18-line (~1.3 KB) summary arrived complete; the exact
   limit is still unknown, so keep the lines short.
+- The "failed" alerts send **two** emails per failure: one when it opens, and an "alert recovered" one about 10 minutes
+  later when the next metric window shows no new failure. Kept on purpose (no `notificationPrompts: ["OPENED"]`).
+- Verify-failed alert verified 2026-10-15 (`cdd-backup-verify-z9s85`, run with `MAX_AGE_DAYS=0.001`): both emails arrived.
 - Failed-execution alert verified 2026-10-15 with a deliberate failure
   (`gcloud run jobs execute cdd-backup --update-env-vars EXPORTS=doesnotexist`): email "Failed execution on <project>" arrived.
   An unknown export name now stops the run at startup (failed alert, no summary); to test a failed export with a summary,
