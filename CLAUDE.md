@@ -13,6 +13,7 @@ Failures email the owner via Cloud Monitoring alerts.
 | `README.md` | For people operating this (not Claude): emails and what to do, new computer, access, routine tasks. **Update it when commands, schedules, emails or setup steps change** |
 | `main.py` | The backup: start export -> poll -> stream to GCS, gzip on the fly; then reference data and files; then the summary |
 | `verify_backup.py` | Restore check of a stored run (see "Verification" below). Imports the export table and helpers from `main.py` |
+| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally only (`make exit-kit`); reuses `Source`/`pick_run` from `verify_backup.py` |
 | `Dockerfile` | Required. Without it, `--source .` falls back to buildpacks, which start a web server and the job dies with exit code 127. Runs as non-root user `app` |
 | `requirements.txt` | `google-cloud-storage`, `requests`, `ijson` (streaming JSON parser) for the image; no Secret Manager client: the token is injected as an env var. Keep in sync with `pyproject.toml` (uv) |
 | `Makefile` | Setup, deploy, run, logs, schedule, alerts. `make help` lists targets |
@@ -91,6 +92,7 @@ make deploy-verify   # build and deploy the verification job
 make run-verify      # execute the verification job once and wait
 make schedule-verify # its trigger, Mon-Fri 06:00 (4 h after the backup starts)
 make verify          # run the verification locally (RUN=<run id> for a specific run)
+make exit-kit        # convert a run to SDF/CSV/files in ./exit_kit/<run> (RUN=<run id>; local only)
 make local           # run main.py locally into ./backups (needs CDD_API_TOKEN exported)
 make lint            # ruff check + ruff format --check
 ```
@@ -120,6 +122,9 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
 - CDD returns **404** (not 400) for unsupported query parameters, e.g. `page_size` on `/searches`. Only send documented parameters.
 - Placeholder text left in a command (e.g. literal `PROJECT_ID`) produces misleading permission errors.
 - The backup only contains what the token's user can see: that user must be a member of **all** projects in the vault.
+- **Plate wells count from 0** in CDD (`row`/`col`: a 1536-well plate is rows 0-31, cols 0-47). Row 0, col 0 = A1.
+- Some readout values are `null` (e.g. an IC50 CDD couldn't fit): an empty cell, not "None".
+- Some protocols have no `readout_definitions` key at all: always `.get(..., [])`.
 
 ## Unverified / open items
 

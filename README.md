@@ -115,11 +115,33 @@ The verification will fail on "age" while paused; that's expected.
 
 **After changing the code:** `make lint`, then `make deploy` and `make deploy-verify` (both jobs use the same code).
 
-## Restoring
+## Restoring, or moving away from CDD
 
-The backup is plain JSON plus the original files, so the data can be read with any tool. Putting it back into
-CDD is a manual process (CDD assigns new ids on import, and protocols must be recreated in the web app).
+**The exit kit** turns a backup run into standard files that any chemistry or lab-data system can import,
+without CDD:
+
+```bash
+gcloud auth application-default login   # once per computer (needs Python 3.14 + `uv sync`, see above)
+make exit-kit                           # newest complete run; or: make exit-kit RUN=2026-10-15T172516Z
+```
+
+It writes `exit_kit/<run>/` (git-ignored: **it contains the research data, keep it private**):
+`compounds.sdf` (structures with names, ids, InChIKeys), `batches.csv`, one folder per assay protocol with
+`readouts.csv` / `runs.csv` / `protocol.json`, `plates.csv`, the original files, and the rest as JSON.
+A `README.txt` inside explains every file. A full vault takes about 1.5 minutes plus the download.
+
+If CDD is gone, that folder is what you take to the new system: SDF for the registry, the CSVs for assay
+results. Tested 2026-10-16 on a full backup: every count matched; 99.98% of structures gave identical
+InChIKeys in RDKit (the rest differ in stereo/isotope layers or are exotic, e.g. metal complexes; check those
+by hand); sampled assay values loaded into SQLite matched the backup exactly.
+
+**Back into CDD** (e.g. a deleted project): import `compounds.sdf` and the CSVs through CDD's normal import.
+CDD assigns new ids, and protocols must be recreated in the web app first (the API can't create them).
 A step-by-step procedure will be in `RESTORE.md` after the first restore drill into a CDD test vault.
+
+**What the backup can't give back:** the ELN and the user list (need a Vault Administrator token), projects
+the backup user isn't a member of, CDD's change history, and CDD's own tools (curve fitting, plots, SAR views;
+the inputs and the fit results are kept).
 
 ## Costs
 

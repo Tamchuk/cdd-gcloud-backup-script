@@ -2,5 +2,6 @@
 .env
 config.mk
 backups/
+exit_kit/
 __pycache__/
 .venv/

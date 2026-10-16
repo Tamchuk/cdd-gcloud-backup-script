@@ -31,7 +31,7 @@ COMPUTE_SA      = $(PROJECT_NUMBER)-compute@developer.gserviceaccount.com
 ME              = $(shell gcloud config get-value account 2>/dev/null)
 
 .PHONY: help setup apis bucket service-account secret iam builder-role \
-        deploy deploy-verify run run-verify executions logs list-backups local verify lint \
+        deploy deploy-verify run run-verify executions logs list-backups local verify exit-kit lint \
         schedule schedule-verify schedule-run schedule-pause schedule-resume alerts
 
 help: ## Show this help
@@ -142,6 +142,9 @@ local: require-CDD_VAULT_ID ## Run main.py locally into ./backups (needs CDD_API
 verify: require-BUCKET_NAME require-CDD_VAULT_ID ## Check a stored backup locally (newest full run, or RUN=<run id>). Needs `gcloud auth application-default login` once
 	@# Live counts vs CDD only if CDD_API_TOKEN is exported in your shell
 	python verify_backup.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
+
+exit-kit: require-BUCKET_NAME require-CDD_VAULT_ID ## Convert a backup run to SDF/CSV/files in ./exit_kit/<run> (newest, or RUN=<run id>). Same login as verify
+	python exit_kit.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
 
 lint: ## Run ruff (check + format check)
 	ruff check . && ruff format --check .
