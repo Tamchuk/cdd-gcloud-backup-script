@@ -113,7 +113,9 @@ The verification will fail on "age" while paused; that's expected.
 **Change the schedule:** edit `SCHEDULE` / `VERIFY_SCHEDULE` in `config.mk`, then `make schedule` /
 `make schedule-verify`. If backups become less frequent than daily, raise `MAX_AGE_DAYS` and `make deploy-verify`.
 
-**After changing the code:** `make lint`, then `make deploy` and `make deploy-verify` (both jobs use the same code).
+**After changing the code:** `make lint`, then `make verify` and `make exit-kit` on a recent backup: both must
+end with 0 failed (the exit kit is rarely used, so this is when it gets tested). Then `make deploy` and
+`make deploy-verify` (both jobs use the same code).
 
 ## Restoring, or moving away from CDD
 
@@ -128,12 +130,19 @@ make exit-kit                           # newest complete run; or: make exit-kit
 It writes `exit_kit/<run>/` (git-ignored: **it contains the research data, keep it private**):
 `compounds.sdf` (structures with names, ids, InChIKeys), `batches.csv`, one folder per assay protocol with
 `readouts.csv` / `runs.csv` / `protocol.json`, `plates.csv`, the original files, and the rest as JSON.
-A `README.txt` inside explains every file. A full vault takes about 1.5 minutes plus the download.
+A `README.txt` inside explains every file. A full vault takes about 2 minutes plus the download.
+
+**It checks its own output**: after writing, it reads the files back and compares them with the backup
+(record counts for every file, a few thousand sampled values and links, plate labels, file sizes). It ends
+with "All checks passed." or exits with an error listing what differs: then don't rely on that output.
+
+`make exit-kit CHECK_STRUCTURES=1` also reads every structure with RDKit, an independent chemistry toolkit
+(downloaded on first use; a few more minutes), and lists molecules whose InChIKey differs from CDD's in
+`structure_differences.csv`. Expect a small share: on 2026-10-16, 53 of 253,788 (stereo/isotope layers read
+differently, or exotic structures such as metal complexes). Look at those by hand before a migration.
 
 If CDD is gone, that folder is what you take to the new system: SDF for the registry, the CSVs for assay
-results. Tested 2026-10-16 on a full backup: every count matched; 99.98% of structures gave identical
-InChIKeys in RDKit (the rest differ in stereo/isotope layers or are exotic, e.g. metal complexes; check those
-by hand); sampled assay values loaded into SQLite matched the backup exactly.
+results.
 
 **Back into CDD** (e.g. a deleted project): import `compounds.sdf` and the CSVs through CDD's normal import.
 CDD assigns new ids, and protocols must be recreated in the web app first (the API can't create them).

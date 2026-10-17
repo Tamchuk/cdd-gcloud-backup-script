@@ -13,7 +13,8 @@ Failures email the owner via Cloud Monitoring alerts.
 | `README.md` | For people operating this (not Claude): emails and what to do, new computer, access, routine tasks. **Update it when commands, schedules, emails or setup steps change** |
 | `main.py` | The backup: start export -> poll -> stream to GCS, gzip on the fly; then reference data and files; then the summary |
 | `verify_backup.py` | Restore check of a stored run (see "Verification" below). Imports the export table and helpers from `main.py` |
-| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally only (`make exit-kit`); reuses `Source`/`pick_run` from `verify_backup.py` |
+| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally only (`make exit-kit`); reuses `Source`/`pick_run` from `verify_backup.py`. Ends with `check_output`: reads its output back with plain CSV/SDF parsing and compares with the backup (counts, ~0.2% sampled values/links, plate labels, file sizes); exit 1 on any difference. Keep that check independent of the writing code |
+| `check_structures.py` | Optional RDKit check of `compounds.sdf` (InChIKey vs CDD's), run by `exit_kit.py --check-structures` via `uv run --with rdkit` (RDKit is not a project dependency). Baseline 2026-10-16: 53 of 253,788 differ (stereo/isotope, exotic) |
 | `Dockerfile` | Required. Without it, `--source .` falls back to buildpacks, which start a web server and the job dies with exit code 127. Runs as non-root user `app` |
 | `requirements.txt` | `google-cloud-storage`, `requests`, `ijson` (streaming JSON parser) for the image; no Secret Manager client: the token is injected as an env var. Keep in sync with `pyproject.toml` (uv) |
 | `Makefile` | Setup, deploy, run, logs, schedule, alerts. `make help` lists targets |
@@ -67,12 +68,14 @@ Reads a stored run (default: the newest run with every default export complete) 
 files parse to the end, sizes match markers, record count == the export's own `count`, no duplicate ids,
 links (molecule -> collections, batch -> molecule, readout row -> batch/protocol/run/plate, run -> protocol,
 files list -> stored files with matching sizes), molecules have structures, readout rows have values.
+**Format drift:** `EXPECTED_FIELDS` lists the fields restores and `exit_kit.py` depend on; FAIL if one is absent from
+*every* record of an export (CDD changed its format). Update it when `exit_kit.py` starts using a new field.
 With `CDD_API_TOKEN` it also compares each bulk export with CDD's current count (`page_size=1` request; more than
 1% fewer in the backup = FAIL). With `MAX_AGE_DAYS` (job: 2) it fails if the newest complete backup is older, which
 also catches a paused or broken backup schedule. Exit 1 on any FAIL -> the job's failed alert. No email on success.
 Same image and service account as the backup; reads the bucket with the storage library (locally that needs
 `gcloud auth application-default login` once). Not covered: a real restore into CDD (plan: a yearly drill into a test
-vault), data the token's user can't see, chemistry-level structure checks (RDKit).
+vault), data the token's user can't see, chemistry-level structure checks (RDKit: only in `exit_kit.py --check-structures`).
 
 ## Commands
 
@@ -92,7 +95,8 @@ make deploy-verify   # build and deploy the verification job
 make run-verify      # execute the verification job once and wait
 make schedule-verify # its trigger, Mon-Fri 06:00 (4 h after the backup starts)
 make verify          # run the verification locally (RUN=<run id> for a specific run)
-make exit-kit        # convert a run to SDF/CSV/files in ./exit_kit/<run> (RUN=<run id>; local only)
+make exit-kit        # convert a run to SDF/CSV/files in ./exit_kit/<run>, then self-check
+                     # (RUN=<run id>; CHECK_STRUCTURES=1 adds RDKit; local only)
 make local           # run main.py locally into ./backups (needs CDD_API_TOKEN exported)
 make lint            # ruff check + ruff format --check
 ```
@@ -164,3 +168,9 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
 - Never print, log, echo or commit the CDD token. Never create service account keys.
 - Don't broaden IAM roles to make an error go away; find out which identity is missing which permission first.
 - Don't change the `.done` marker convention or add delete permission without discussing it.
+- **After any change to `main.py`, `exit_kit.py` or `verify_backup.py`, before committing:** `make lint`, then run the
+  exit kit and the verification on a recent real backup (download a run into `./backups/` with
+  `gcloud storage cp -r gs://<bucket>/backups/<run> backups/backups/`, then
+  `python exit_kit.py --local ./backups --vault <id> --run <run>` and `python verify_backup.py --local ./backups ...`).
+  Both must end with 0 failed. The exit kit is code nobody runs for months, so this is when it gets tested.
+  When `exit_kit.py` starts reading a new field, add it to `EXPECTED_FIELDS` in `verify_backup.py`.

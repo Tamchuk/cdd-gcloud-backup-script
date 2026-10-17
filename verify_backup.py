@@ -80,6 +80,41 @@ REF_TARGETS = {
 # the backup. Up to this fraction is a warning; more is a failure.
 LIVE_COUNT_TOLERANCE = 0.01
 MAX_EXAMPLES = 5
+# Fields the restore and exit_kit.py depend on. FAIL if one is in NO record of an
+# export: that means CDD changed its export format (a field can be legitimately
+# empty in some records, so a single missing value is fine).
+# "a.b": field b inside object a, or inside the items of list a.
+# "a.*.b": field b inside the values of a, an object keyed by ids (readouts).
+# Keep in sync with what exit_kit.py reads.
+EXPECTED_FIELDS = {
+    "molecules": ["id", "name", "molfile", "smiles", "inchi_key", "synonyms", "projects",
+                  "collections", "collections.id", "source_files.id", "source_files.name"],
+    "batches": ["id", "name", "molecule", "molecule.id", "molecule.name", "batch_fields",
+                "salt_name", "formula_weight"],
+    "readout_rows": ["id", "type", "protocol", "molecule", "batch", "run", "readouts",
+                     "readouts.*.value", "well", "well.plate", "well.row", "well.col"],
+    "protocols": ["id", "name", "readout_definitions", "readout_definitions.id",
+                  "readout_definitions.name", "readout_definitions.unit_label", "runs"],
+    "runs": ["id", "protocol", "run_date", "person", "run_fields", "source_files",
+             "source_files.id", "source_files.name"],
+    "plates": ["id", "name", "wells", "wells.row", "wells.col", "wells.batch"],
+    "files": ["id", "name", "object", "bytes"],
+}  # fmt: skip
+
+
+def field_names(record):
+    """The record's fields, plus one level down in EXPECTED_FIELDS' notation."""
+    for key, value in record.items():
+        yield key
+        if isinstance(value, dict) and value:
+            first = next(iter(value.values()))
+            if all(k.isdigit() for k in value) and isinstance(first, dict):
+                yield from (f"{key}.*.{k}" for k in first)  # e.g. readouts by id
+            else:
+                yield from (f"{key}.{k}" for k in value)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            yield from (f"{key}.{k}" for k in value[0])
+
 
 results = []  # (level, name, message); level is PASS, WARN or FAIL
 
@@ -203,6 +238,7 @@ def verify_bulk(source, name, path, marker_bytes, ids, sizes):
     refs = {}  # field -> Counter of referenced ids
     no_structure = no_values = 0
     bad_files = []  # files list: (id, problem)
+    fields = Counter()  # field name -> number of records that have it
 
     def ref(field, value):
         value = _id(value)
@@ -213,6 +249,7 @@ def verify_bulk(source, name, path, marker_bytes, ids, sizes):
     with source.open(path) as raw, gzip.GzipFile(fileobj=raw) as gz:
         for item in ijson.items(gz, "objects.item", use_float=True):
             seen[item.get("id")] += 1
+            fields.update(field_names(item))
             if name == "molecules":
                 if not (item.get("smiles") or item.get("molfile")):
                     no_structure += 1
@@ -254,6 +291,22 @@ def verify_bulk(source, name, path, marker_bytes, ids, sizes):
             name,
             f"{records:,} records, matches the export's count ({_size(size)})",
         )
+
+    if records:
+        gone = [f for f in EXPECTED_FIELDS.get(name, []) if not fields[f]]
+        if gone:
+            report(
+                "FAIL",
+                name,
+                f"field(s) {', '.join(gone)} missing in every record: CDD may have changed"
+                " its export format (restores and exit_kit.py depend on them)",
+            )
+        elif name in EXPECTED_FIELDS:
+            report(
+                "PASS",
+                name,
+                f"all {len(EXPECTED_FIELDS[name])} expected fields present",
+            )
 
     dups = [i for i, n in seen.items() if n > 1]
     if dups:

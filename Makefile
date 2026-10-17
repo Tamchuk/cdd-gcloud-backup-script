@@ -143,8 +143,8 @@ verify: require-BUCKET_NAME require-CDD_VAULT_ID ## Check a stored backup locall
 	@# Live counts vs CDD only if CDD_API_TOKEN is exported in your shell
 	python verify_backup.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
 
-exit-kit: require-BUCKET_NAME require-CDD_VAULT_ID ## Convert a backup run to SDF/CSV/files in ./exit_kit/<run> (newest, or RUN=<run id>). Same login as verify
-	python exit_kit.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
+exit-kit: require-BUCKET_NAME require-CDD_VAULT_ID ## Convert a backup run to SDF/CSV/files in ./exit_kit/<run>, then check it (RUN=<run id>; CHECK_STRUCTURES=1 adds RDKit)
+	python exit_kit.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN)) $(if $(CHECK_STRUCTURES),--check-structures)
 
 lint: ## Run ruff (check + format check)
 	ruff check . && ruff format --check .
