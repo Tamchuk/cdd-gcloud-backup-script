@@ -165,9 +165,17 @@ class Kit:
                 if key not in field_names:
                     field_names.append(key)
         columns = [
-            "batch_id", "batch_name", "molecule_id", "molecule_name", "salt_name",
-            "formula_weight", "projects", "owner", "created", "source_files",
-        ] + field_names  # fmt: skip
+            "batch_id",
+            "batch_name",
+            "molecule_id",
+            "molecule_name",
+            "salt_name",
+            "formula_weight",
+            "projects",
+            "owner",
+            "created",
+            "source_files",
+        ] + field_names
         with open(self.path("batches.csv"), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(columns)
@@ -187,7 +195,7 @@ class Kit:
                         b.get("owner"),
                         b.get("created_at"),
                         self.file_list(b),
-                    ]  # fmt: skip
+                    ]
                     + [fields.get(k) for k in field_names]
                 )
                 self.counts["batches"] += 1
@@ -195,8 +203,18 @@ class Kit:
     # --- Plates ----------------------------------------------------------------
 
     def write_plates(self):
-        columns = ["plate_id", "plate_name", "well", "row", "col", "batch_id",
-                   "batch_name", "molecule_name", "plate_volume", "plate_concentration"]  # fmt: skip
+        columns = [
+            "plate_id",
+            "plate_name",
+            "well",
+            "row",
+            "col",
+            "batch_id",
+            "batch_name",
+            "molecule_name",
+            "plate_volume",
+            "plate_concentration",
+        ]
         with open(self.path("plates.csv"), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(columns)
@@ -218,7 +236,7 @@ class Kit:
                             self.molecule_names.get(molecule_id),
                             p.get("volume"),
                             p.get("concentration"),
-                        ]  # fmt: skip
+                        ]
                     )
                     self.counts["plate wells"] += 1
                 self.counts["plates"] += 1
@@ -259,11 +277,22 @@ class Kit:
                 open_files.append(f)
                 writers[pid] = csv.writer(f)
                 writers[pid].writerow(
-                    ["readout_row_id", "type", "molecule_id", "molecule_name", "batch_id",
-                     "batch_name", "run_id", "run_date", "plate_id", "plate_name", "well"]
+                    [
+                        "readout_row_id",
+                        "type",
+                        "molecule_id",
+                        "molecule_name",
+                        "batch_id",
+                        "batch_name",
+                        "run_id",
+                        "run_date",
+                        "plate_id",
+                        "plate_name",
+                        "well",
+                    ]
                     + [label for _, label in readout_columns.get(pid, [])]
                     + ["outliers", "fit_parameters", "other_readouts"]
-                )  # fmt: skip
+                )
             readouts = row.get("readouts") or {}
             known = {str(i) for i, _ in readout_columns.get(pid, [])}
             other = {k: v for k, v in readouts.items() if k not in known}
@@ -284,7 +313,7 @@ class Kit:
                     well.get("plate"),
                     self.plates.get(well.get("plate")),
                     well_label(well.get("row"), well.get("col")),
-                ]  # fmt: skip
+                ]
                 + [
                     self.readout_value(readouts.get(str(i)))
                     for i, _ in readout_columns.get(pid, [])
@@ -294,7 +323,7 @@ class Kit:
                         label
                         for i, label in readout_columns.get(pid, [])
                         if (readouts.get(str(i)) or {}).get("outlier")
-                    ),  # fmt: skip
+                    ),
                     json.dumps(row["batch_run_fit_parameters"])
                     if row.get("batch_run_fit_parameters")
                     else "",
@@ -305,8 +334,10 @@ class Kit:
         for f in open_files:
             f.close()
         if unknown_readouts:
-            print(f"  note: {sum(unknown_readouts.values()):,} readout values have no definition in their"
-                  " protocol; kept as JSON in the other_readouts column")  # fmt: skip
+            print(
+                f"  note: {sum(unknown_readouts.values()):,} readout values have no definition in their"
+                " protocol; kept as JSON in the other_readouts column"
+            )
 
     @staticmethod
     def readout_value(readout):
@@ -326,8 +357,19 @@ class Kit:
                     field_names.append(key)
         with open(self.path(folder, "runs.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "run_date", "person", "place", "conditions", "project",
-                             "created", "source_files"] + field_names)  # fmt: skip
+            writer.writerow(
+                [
+                    "run_id",
+                    "run_date",
+                    "person",
+                    "place",
+                    "conditions",
+                    "project",
+                    "created",
+                    "source_files",
+                ]
+                + field_names
+            )
             for r in runs:
                 fields = r.get("run_fields") or {}
                 writer.writerow(
@@ -340,7 +382,7 @@ class Kit:
                         (r.get("project") or {}).get("name"),
                         r.get("created_at"),
                         self.file_list(r),
-                    ]  # fmt: skip
+                    ]
                     + [fields.get(k) for k in field_names]
                 )
                 self.counts["runs"] += 1
@@ -536,8 +578,10 @@ def check_output(kit):
         rows = list(csv.DictReader(f))
     labels_seen = Counter((r["plate_id"], r["well"]) for r in rows)
     check(len(rows) == total, f"plates.csv: {len(rows):,} wells, backup has {total:,}")
-    check(all(r["well"] for r in rows) and max(labels_seen.values(), default=1) == 1,
-          "plates.csv: every well has a label, none repeats on a plate")  # fmt: skip
+    check(
+        all(r["well"] for r in rows) and max(labels_seen.values(), default=1) == 1,
+        "plates.csv: every well has a label, none repeats on a plate",
+    )
 
     # files/: every listed file present with its size
     if "files" in kit.files:
@@ -648,8 +692,11 @@ def main():
     # Only complete files (with their .done marker)
     partial = [n for n, p in files.items() if p + ".done" not in sizes]
     files = {n: p for n, p in files.items() if n not in partial}
-    missing = [n for n in ("molecules", "batches", "protocols", "runs", "readout_rows", "plates")
-               if n not in files]  # fmt: skip
+    missing = [
+        n
+        for n in ("molecules", "batches", "protocols", "runs", "readout_rows", "plates")
+        if n not in files
+    ]
     if missing:
         sys.exit(
             f"Run {run_id} lacks complete {', '.join(missing)}: pick another with --run"
@@ -675,8 +722,16 @@ def main():
         step()
 
     with open(kit.path("README.txt"), "w") as f:
-        f.write(README.format(run=run_id, vault=args.vault, **{
-            "compounds": kit.counts["compounds"], "batches": kit.counts["batches"]}))  # fmt: skip
+        f.write(
+            README.format(
+                run=run_id,
+                vault=args.vault,
+                **{
+                    "compounds": kit.counts["compounds"],
+                    "batches": kit.counts["batches"],
+                },
+            )
+        )
     print("\nWritten:")
     for what, n in kit.counts.items():
         print(f"  {what}: {n:,}")

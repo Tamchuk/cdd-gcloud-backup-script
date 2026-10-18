@@ -1,5 +1,5 @@
 [project]
-name = "gnomica-cdd-backup-script"
+name = "cdd-gcloud-backup-script"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
