@@ -54,6 +54,7 @@ from main import (
     EXPORT_SOURCES,
     ZIP_EXPORTS,
     _size,
+    log,
     request_with_retry,
 )
 
@@ -186,7 +187,7 @@ def pick_run(sizes, vault_prefix, run_id):
                 for name in DEFAULT_EXPORTS
             )
         ]
-        run_id = full[-1] if full else sorted(runs)[-1]
+        run_id = full[-1] if full else max(runs)
     return run_id, runs[run_id]
 
 
@@ -401,7 +402,8 @@ def live_count(session, vault_url, name):
 def check_live(session, vault_url, name, backup_count):
     try:
         live = live_count(session, vault_url, name)
-    except Exception as exc:
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        # Network/HTTP error, a response that isn't JSON, or one without "count"
         report("WARN", name, f"could not get CDD's current count: {exc!r}")
         return
     if backup_count >= live:
@@ -485,8 +487,11 @@ def main():
                 records = verify_bulk(source, name, path, marker_bytes, ids, sizes)
                 if session and how in ("post", "get"):
                     check_live(session, vault_url, name, records)
-        except Exception as exc:  # unreadable file: report and go on with the rest
-            report("FAIL", name, f"could not read: {exc!r}")
+        except Exception as exc:
+            # Broad on purpose: one damaged or unreadable file must not stop the other
+            # checks. The traceback in the logs tells file damage from a bug in this script.
+            log.exception("[%s] could not read", name)
+            report("FAIL", name, f"could not read: {exc!r} (traceback in the logs)")
 
     totals = Counter(level for level, _, _ in results)
     print(

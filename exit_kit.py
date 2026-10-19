@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
+from contextlib import ExitStack
 
 import ijson
 
@@ -246,7 +247,7 @@ class Kit:
     def write_assays(self):
         protocols = {p["id"]: p for p in self.records("protocols")}
         self.runs = {r["id"]: r for r in self.records("runs")}
-        folders, writers, open_files, readout_columns = {}, {}, [], {}
+        folders, writers, readout_columns = {}, {}, {}
 
         for pid, p in protocols.items():
             folder = f"assays/{pid}-{safe(p.get('name'))}"
@@ -269,70 +270,72 @@ class Kit:
             self.counts["protocols"] += 1
 
         unknown_readouts = Counter()
-        for row in self.records("readout_rows"):
-            pid = row.get("protocol")
-            if pid not in writers:
-                folder = folders.get(pid) or f"assays/{pid}-unknown_protocol"
-                f = open(self.path(folder, "readouts.csv"), "w", newline="")
-                open_files.append(f)
-                writers[pid] = csv.writer(f)
+        # One readouts.csv per protocol, all open at once. The stack closes every
+        # one of them, also when the export fails halfway
+        with ExitStack() as stack:
+            for row in self.records("readout_rows"):
+                pid = row.get("protocol")
+                if pid not in writers:
+                    folder = folders.get(pid) or f"assays/{pid}-unknown_protocol"
+                    f = stack.enter_context(
+                        open(self.path(folder, "readouts.csv"), "w", newline="")
+                    )
+                    writers[pid] = csv.writer(f)
+                    writers[pid].writerow(
+                        [
+                            "readout_row_id",
+                            "type",
+                            "molecule_id",
+                            "molecule_name",
+                            "batch_id",
+                            "batch_name",
+                            "run_id",
+                            "run_date",
+                            "plate_id",
+                            "plate_name",
+                            "well",
+                        ]
+                        + [label for _, label in readout_columns.get(pid, [])]
+                        + ["outliers", "fit_parameters", "other_readouts"]
+                    )
+                readouts = row.get("readouts") or {}
+                known = {str(i) for i, _ in readout_columns.get(pid, [])}
+                other = {k: v for k, v in readouts.items() if k not in known}
+                unknown_readouts.update(other.keys())
+                well = row.get("well") or {}
+                run = self.runs.get(row.get("run")) or {}
+                batch_name = self.batches.get(row.get("batch"), (None,))[0]
                 writers[pid].writerow(
                     [
-                        "readout_row_id",
-                        "type",
-                        "molecule_id",
-                        "molecule_name",
-                        "batch_id",
-                        "batch_name",
-                        "run_id",
-                        "run_date",
-                        "plate_id",
-                        "plate_name",
-                        "well",
+                        row["id"],
+                        row.get("type"),
+                        row.get("molecule"),
+                        self.molecule_names.get(row.get("molecule")),
+                        row.get("batch"),
+                        batch_name,
+                        row.get("run"),
+                        run.get("run_date"),
+                        well.get("plate"),
+                        self.plates.get(well.get("plate")),
+                        well_label(well.get("row"), well.get("col")),
                     ]
-                    + [label for _, label in readout_columns.get(pid, [])]
-                    + ["outliers", "fit_parameters", "other_readouts"]
+                    + [
+                        self.readout_value(readouts.get(str(i)))
+                        for i, _ in readout_columns.get(pid, [])
+                    ]
+                    + [
+                        "; ".join(
+                            label
+                            for i, label in readout_columns.get(pid, [])
+                            if (readouts.get(str(i)) or {}).get("outlier")
+                        ),
+                        json.dumps(row["batch_run_fit_parameters"])
+                        if row.get("batch_run_fit_parameters")
+                        else "",
+                        json.dumps(other) if other else "",
+                    ]
                 )
-            readouts = row.get("readouts") or {}
-            known = {str(i) for i, _ in readout_columns.get(pid, [])}
-            other = {k: v for k, v in readouts.items() if k not in known}
-            unknown_readouts.update(other.keys())
-            well = row.get("well") or {}
-            run = self.runs.get(row.get("run")) or {}
-            batch_name = self.batches.get(row.get("batch"), (None,))[0]
-            writers[pid].writerow(
-                [
-                    row["id"],
-                    row.get("type"),
-                    row.get("molecule"),
-                    self.molecule_names.get(row.get("molecule")),
-                    row.get("batch"),
-                    batch_name,
-                    row.get("run"),
-                    run.get("run_date"),
-                    well.get("plate"),
-                    self.plates.get(well.get("plate")),
-                    well_label(well.get("row"), well.get("col")),
-                ]
-                + [
-                    self.readout_value(readouts.get(str(i)))
-                    for i, _ in readout_columns.get(pid, [])
-                ]
-                + [
-                    "; ".join(
-                        label
-                        for i, label in readout_columns.get(pid, [])
-                        if (readouts.get(str(i)) or {}).get("outlier")
-                    ),
-                    json.dumps(row["batch_run_fit_parameters"])
-                    if row.get("batch_run_fit_parameters")
-                    else "",
-                    json.dumps(other) if other else "",
-                ]
-            )
-            self.counts["readout rows"] += 1
-        for f in open_files:
-            f.close()
+                self.counts["readout rows"] += 1
         if unknown_readouts:
             print(
                 f"  note: {sum(unknown_readouts.values()):,} readout values have no definition in their"
@@ -625,7 +628,7 @@ def check_structures(sdf_path):
         "  RDKit check (downloads RDKit once, a few minutes for a full vault) ...",
         flush=True,
     )
-    return subprocess.run(cmd).returncode
+    return subprocess.run(cmd, check=False).returncode
 
 
 README = """\
@@ -726,10 +729,8 @@ def main():
             README.format(
                 run=run_id,
                 vault=args.vault,
-                **{
-                    "compounds": kit.counts["compounds"],
-                    "batches": kit.counts["batches"],
-                },
+                compounds=kit.counts["compounds"],
+                batches=kit.counts["batches"],
             )
         )
     print("\nWritten:")

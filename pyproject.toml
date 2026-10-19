@@ -7,3 +7,13 @@ dependencies = [
     "ijson==3.6.0",
     "requests>=2.34.2",
 ]
+
+[tool.ruff.lint]
+# The scripts log through main.py's logger; lets Ruff see e.g. log.exception(...)
+# as logging (a broad except that logs its traceback isn't flagged as blind)
+logger-objects = ["main.log"]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.1",
+]
