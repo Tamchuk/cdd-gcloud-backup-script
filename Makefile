@@ -30,7 +30,7 @@ PROJECT_NUMBER  = $(shell gcloud projects describe $(PROJECT_ID) --format='value
 COMPUTE_SA      = $(PROJECT_NUMBER)-compute@developer.gserviceaccount.com
 ME              = $(shell gcloud config get-value account 2>/dev/null)
 
-.PHONY: help setup apis bucket service-account secret iam builder-role \
+.PHONY: help setup apis bucket service-account secret secret-if-missing iam builder-role \
         deploy deploy-verify run run-verify executions logs list-backups local verify exit-kit lint \
         schedule schedule-verify schedule-run schedule-pause schedule-resume alerts
 
@@ -43,7 +43,7 @@ require-%:
 
 # --- One-time setup (safe to re-run) ---------------------------------------
 
-setup: apis bucket service-account iam builder-role ## All one-time setup except the token (run `make secret` separately)
+setup: apis bucket service-account secret-if-missing iam builder-role ## All one-time setup (asks for the CDD token if none is stored yet)
 
 apis: require-PROJECT_ID ## Enable the Google Cloud APIs this project needs
 	$(GCLOUD) services enable run.googleapis.com cloudbuild.googleapis.com \
@@ -69,7 +69,16 @@ secret: require-PROJECT_ID ## Store the CDD token in Secret Manager (prompts; ad
 	  printf '%s' "$$T" | $(GCLOUD) secrets create $(SECRET_NAME) --data-file=-; \
 	fi
 
+# Used by `setup`: `iam` needs the secret to exist, but re-running setup must not ask
+# for the token again (to replace the token: `make secret`).
+secret-if-missing: require-PROJECT_ID
+	@$(GCLOUD) secrets describe $(SECRET_NAME) >/dev/null 2>&1 \
+	  && echo "Secret $(SECRET_NAME) already exists (to replace the token: make secret)" \
+	  || $(MAKE) --no-print-directory secret
+
 iam: require-PROJECT_ID require-BUCKET_NAME ## Give the job's service account its permissions, and let you deploy it
+	@$(GCLOUD) secrets describe $(SECRET_NAME) >/dev/null 2>&1 \
+	  || { echo "Secret $(SECRET_NAME) doesn't exist yet: run make secret first" >&2; exit 1; }
 	$(GCLOUD) secrets add-iam-policy-binding $(SECRET_NAME) \
 	  --member=serviceAccount:$(SA) --role=roles/secretmanager.secretAccessor --format=none
 	$(GCLOUD) storage buckets add-iam-policy-binding gs://$(BUCKET_NAME) \

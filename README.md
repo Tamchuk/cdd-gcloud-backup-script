@@ -83,8 +83,9 @@ You also need the CDD side: which CDD user owns the API token, and an admin who 
 In this order; each step can be re-run safely:
 
 ```bash
-make setup            # APIs, bucket, service account, permissions (needs project owner rights)
-make secret           # paste the CDD API token (it isn't shown or stored anywhere else)
+make setup            # APIs, bucket, service account, CDD token, permissions (needs project owner rights).
+                      # The first time, it asks you to paste the CDD API token (not shown on screen,
+                      # stored only in Secret Manager); re-running it doesn't ask again
 make deploy           # build and deploy the backup job
 make run              # one backup now (~80 min); check the summary email
 make deploy-verify    # build and deploy the verification job
@@ -99,8 +100,9 @@ accident, for N days) and a **lifecycle rule** deleting objects after the number
 
 ## Routine tasks
 
-**Rotate the CDD token** (e.g. when it expires or the backup user changes): `make secret` and paste the new one.
-The next run uses it; no redeploy needed. Then disable the old version in Secret Manager.
+**Replace the CDD token** (e.g. when it expires or the backup user changes): `make secret` and paste the new one.
+It is stored as a new version of the same secret; the next run uses it, no redeploy needed. Then disable the old
+version in Secret Manager.
 
 **Run a backup or check now:** `make run` / `make run-verify`.
 

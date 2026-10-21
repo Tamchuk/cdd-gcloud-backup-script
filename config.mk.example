@@ -1,7 +1,8 @@
 # Copy to config.mk (it is git-ignored) and fill in your values:
 #   cp config.mk.example config.mk
 # Make reads config.mk as code, so keep it to simple NAME = value lines.
-# **NEVER** put the CDD token here: it lives in Secret Manager (`make secret`).
+# **NEVER** put the CDD token here: it lives in Secret Manager (`make setup` asks
+# for it the first time; `make secret` replaces it).
 
 # --- Required ------------------------------------------------------------------
 PROJECT_ID   = my-gcp-project-id

@@ -81,8 +81,9 @@ vault), data the token's user can't see, chemistry-level structure checks (RDKit
 
 ```bash
 make help            # list targets
-make setup           # APIs, bucket, service account, IAM, builder role (idempotent)
-make secret          # prompts for the CDD token and stores it in Secret Manager
+make setup           # APIs, bucket, service account, token (asked only if no secret exists yet), IAM,
+                     # builder role (idempotent). `iam` needs the secret, so it comes after the token step
+make secret          # prompts for the CDD token and stores it as a new secret version (to replace the token)
 make deploy          # build from source and deploy the job (no schedule)
 make run             # execute the job once and wait
 make logs            # last week of logs of both jobs, with the job name (JOB=backup|verify, LOG_LIMIT=100)
