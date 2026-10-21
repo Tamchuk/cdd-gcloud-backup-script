@@ -81,6 +81,8 @@ vault), data the token's user can't see, chemistry-level structure checks (RDKit
 
 ```bash
 make help            # list targets
+make config          # settings in use (which project!). Every cloud target first runs check-config:
+                     # refuses config.mk.example values, prints ">> Project ..., bucket ..."
 make setup           # APIs, bucket, service account, token (asked only if no secret exists yet), IAM,
                      # builder role (idempotent). `iam` needs the secret, so it comes after the token step
 make secret          # prompts for the CDD token and stores it as a new secret version (to replace the token)
@@ -99,7 +101,8 @@ make verify          # run the verification locally (RUN=<run id> for a specific
 make exit-kit        # convert a run to SDF/CSV/files in ./exit_kit/<run>, then self-check
                      # (RUN=<run id>; CHECK_STRUCTURES=1 adds RDKit; local only)
 make local           # run main.py locally into ./backups (needs CDD_API_TOKEN exported)
-make lint            # ruff check + ruff format --check
+make lint            # ruff check + ruff format --check (Ruff pinned in pyproject's dev group)
+# verify, exit-kit, local and lint run through `uv run`: no venv activation needed
 ```
 
 Local test without GCP: `CDD_API_TOKEN=... CDD_VAULT_ID=... EXPORTS=molecules LOCAL_OUTPUT_DIR=./backups python main.py`
@@ -123,6 +126,10 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
 
 - No Dockerfile -> buildpacks -> exit 127.
 - `--set-env-vars` splits on commas; `EXPORTS=a,b` needs a custom separator (`^@^...`, already in the Makefile).
+- An `EXPORTS` left in a shell once deployed a molecules-only backup (Make's `?=` takes environment variables).
+  The Makefile now ignores `EXPORTS` from the environment, with a warning.
+- The README once had `make secret` after `make setup`, but `iam` needs the secret: setup failed on a new project.
+  `setup` now creates the secret itself (`secret-if-missing`) before `iam`.
 - Bucket location can't be changed after creation. Keep bucket and job in a region your data-residency rules allow.
 - CDD returns **404** (not 400) for unsupported query parameters, e.g. `page_size` on `/searches`. Only send documented parameters.
 - Placeholder text left in a command (e.g. literal `PROJECT_ID`) produces misleading permission errors.

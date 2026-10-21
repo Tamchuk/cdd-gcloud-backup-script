@@ -51,18 +51,27 @@ You need access to the Google Cloud project (next section). Then the simplest wa
 ```bash
 git clone <this repo's URL> && cd <repo folder>
 cp config.mk.example config.mk     # then edit config.mk: project, region, bucket, vault id, email
+make config                        # shows the settings in use; check the project is the right one
 make help                          # lists all commands
 make logs                          # recent logs of both jobs
 ```
 
+**Run `make config` at the start of every session.** It shows which Google Cloud project, bucket and vault the
+commands will change, and every command that touches the cloud also prints `>> Project ..., bucket ...` first.
+If it says the project is "not in config.mk", set `PROJECT_ID` there: otherwise commands go to whatever project
+gcloud happens to be pointed at. Commands refuse to run while config.mk still has the example values.
+
 Everything except local development works with only `gcloud`, `make` and `git`, because the jobs are built and
 run in Google Cloud. On your own computer, install the [gcloud CLI](https://cloud.google.com/sdk/docs/install)
-and run `gcloud auth login` and `gcloud config set project <project id>`. Some commands use `gcloud alpha`/`beta`,
-which gcloud offers to install the first time.
+and run `gcloud auth login`. Some commands use `gcloud alpha`/`beta`, which gcloud offers to install the first time.
 
-**For local development** (`make local`, `make verify`, `make lint`) you also need Python 3.14 and
-[uv](https://docs.astral.sh/uv/): `uv sync` installs everything (uv can install Python 3.14 too). `make verify`
-additionally needs `gcloud auth application-default login` once.
+**For local development and the exit kit** (`make verify`, `make exit-kit`, `make lint`, `make local`) you also need
+[uv](https://docs.astral.sh/uv/). Nothing else: the first run installs Python 3.14 and the packages by itself, and
+no virtual environment needs activating. `make verify` and `make exit-kit` also need
+`gcloud auth application-default login` once per computer.
+
+`EXPORTS` set in your shell is ignored (with a warning): put it in config.mk, or on the command line
+(`make deploy EXPORTS=molecules`), so a leftover from a test can't change what the nightly backup includes.
 
 ## Access you need
 
@@ -83,20 +92,28 @@ You also need the CDD side: which CDD user owns the API token, and an admin who 
 In this order; each step can be re-run safely:
 
 ```bash
+make config           # right project, bucket, vault and email? Fix config.mk first if not
 make setup            # APIs, bucket, service account, CDD token, permissions (needs project owner rights).
-                      # The first time, it asks you to paste the CDD API token (not shown on screen,
-                      # stored only in Secret Manager); re-running it doesn't ask again
-make deploy           # build and deploy the backup job
-make run              # one backup now (~80 min); check the summary email
+                      # The first time, it asks you to paste the CDD API token: NOTHING APPEARS while you
+                      # paste or type (that's normal), then press Enter. Re-running setup doesn't ask again
+make alerts           # the emails (uses ALERT_EMAIL). Before the first run, so you hear about it if it fails
+make deploy           # build and deploy the backup job (a few minutes)
+make run              # one backup now (~80 min), then check the summary email
 make deploy-verify    # build and deploy the verification job
 make run-verify       # check that backup (~5 min); `make logs JOB=verify` should end with 0 failed
 make schedule         # Mon-Fri 02:00 backups
 make schedule-verify  # Mon-Fri 06:00 verifications
-make alerts           # email channel and alert policies (uses ALERT_EMAIL from config.mk)
 ```
 
-Then, in the Cloud Console, give the bucket a **retention policy** (prevents deleting backups, even by
-accident, for N days) and a **lifecycle rule** deleting objects after the number of days you want to keep.
+**`make run` keeps the terminal busy for about 80 minutes.** The backup runs in Google Cloud: closing the terminal
+or losing the connection doesn't stop it (`make executions` shows its state, `make logs JOB=backup` its progress).
+Don't start a second one while it runs.
+
+Then, in the Cloud Console (bucket > Protection, and bucket > Lifecycle):
+- a **retention policy**: nothing in the bucket can be deleted or overwritten before it is N days old, not even by
+  an owner. **Don't lock it** until everything works: a locked policy can never be shortened or removed.
+- a **lifecycle rule** deleting objects after the number of days of backups you want to keep (longer than the
+  retention period; it can't delete anything younger than that anyway).
 
 ## Routine tasks
 
@@ -125,7 +142,7 @@ end with 0 failed (the exit kit is rarely used, so this is when it gets tested).
 without CDD:
 
 ```bash
-gcloud auth application-default login   # once per computer (needs Python 3.14 + `uv sync`, see above)
+gcloud auth application-default login   # once per computer (also needs uv, see "Getting started")
 make exit-kit                           # newest complete run; or: make exit-kit RUN=2026-10-15T172516Z
 ```
 

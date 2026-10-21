@@ -1,9 +1,19 @@
 # Makefile for the CDD backup Cloud Run job. Run `make help` for the targets.
 # Put your settings in config.mk (see config.mk.example), or pass them on the
 # command line: make deploy REGION=europe-west1 ...
-# No secrets live here: the CDD token is stored in Secret Manager (`make secret`).
+# No secrets live here: the CDD token is stored in Secret Manager (`make setup` asks for it).
+
+# An EXPORTS variable left in your shell (e.g. from a test) would silently win over the
+# default "back up everything": ignore it. config.mk and `make deploy EXPORTS=...` still work.
+ifeq ($(origin EXPORTS),environment)
+$(warning Ignoring EXPORTS=$(EXPORTS) from your shell; set it in config.mk if you want it)
+undefine EXPORTS
+endif
 
 -include config.mk
+
+# Before the defaults below: was PROJECT_ID set in config.mk (or on the command line)?
+PROJECT_ID_SOURCE := $(origin PROJECT_ID)
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -30,7 +40,7 @@ PROJECT_NUMBER  = $(shell gcloud projects describe $(PROJECT_ID) --format='value
 COMPUTE_SA      = $(PROJECT_NUMBER)-compute@developer.gserviceaccount.com
 ME              = $(shell gcloud config get-value account 2>/dev/null)
 
-.PHONY: help setup apis bucket service-account secret secret-if-missing iam builder-role \
+.PHONY: help config check-config setup apis bucket service-account secret secret-if-missing iam builder-role \
         deploy deploy-verify run run-verify executions logs list-backups local verify exit-kit lint \
         schedule schedule-verify schedule-run schedule-pause schedule-resume alerts
 
@@ -41,27 +51,48 @@ help: ## Show this help
 require-%:
 	@$(if $($*),:,{ echo "Missing setting: $* (set it in config.mk or on the command line)" >&2; exit 1; })
 
+# Values from config.mk.example that must be replaced before anything touches the cloud
+EXAMPLE_VALUES := my-gcp-project-id my-org-cdd-backups 1234 backups-owner@example.com you@example.com
+
+# Runs before every cloud command: stops on example values, and says which project and
+# bucket are about to be used (there may be a test and a real one).
+check-config: require-PROJECT_ID
+	@bad=""; for v in $(PROJECT_ID) $(BUCKET_NAME) $(CDD_VAULT_ID) $(ALERT_EMAIL); do \
+	  case " $(EXAMPLE_VALUES) " in *" $$v "*) bad="$$bad $$v";; esac; done; \
+	if [ -n "$$bad" ]; then echo "config.mk still has example value(s):$$bad. Edit config.mk first." >&2; exit 1; fi
+	@echo ">> Project $(PROJECT_ID)$(if $(filter-out file command line,$(PROJECT_ID_SOURCE)), (gcloud's active project: not set in config.mk)), bucket $(or $(BUCKET_NAME),-)"
+
+config: ## Show the settings in use. Run this first: it tells you which project you're about to change
+	@echo "PROJECT_ID   = $(PROJECT_ID)$(if $(filter-out file command line,$(PROJECT_ID_SOURCE)),   <- not in config.mk: gcloud's active project)"
+	@echo "REGION       = $(REGION)"
+	@echo "BUCKET_NAME  = $(BUCKET_NAME)"
+	@echo "CDD_VAULT_ID = $(CDD_VAULT_ID)"
+	@echo "ALERT_EMAIL  = $(ALERT_EMAIL)"
+	@echo "EXPORTS      = $(or $(EXPORTS),(default: everything except eln, users))"
+	@echo "SCHEDULE     = $(SCHEDULE)  /  verification: $(VERIFY_SCHEDULE)  ($(TIME_ZONE))"
+	@$(MAKE) --no-print-directory check-config >/dev/null && echo "OK: no example values left"
+
 # --- One-time setup (safe to re-run) ---------------------------------------
 
 setup: apis bucket service-account secret-if-missing iam builder-role ## All one-time setup (asks for the CDD token if none is stored yet)
 
-apis: require-PROJECT_ID ## Enable the Google Cloud APIs this project needs
+apis: check-config ## Enable the Google Cloud APIs this project needs
 	$(GCLOUD) services enable run.googleapis.com cloudbuild.googleapis.com \
 	  artifactregistry.googleapis.com secretmanager.googleapis.com \
 	  cloudscheduler.googleapis.com monitoring.googleapis.com
 
-bucket: require-PROJECT_ID require-REGION require-BUCKET_NAME ## Create the backup bucket if it doesn't exist
+bucket: check-config require-REGION require-BUCKET_NAME ## Create the backup bucket if it doesn't exist
 	@$(GCLOUD) storage buckets describe gs://$(BUCKET_NAME) >/dev/null 2>&1 \
 	  && echo "Bucket gs://$(BUCKET_NAME) already exists" \
 	  || $(GCLOUD) storage buckets create gs://$(BUCKET_NAME) --location=$(REGION) \
 	       --uniform-bucket-level-access --public-access-prevention
 
-service-account: require-PROJECT_ID ## Create the job's runtime service account if it doesn't exist
+service-account: check-config ## Create the job's runtime service account if it doesn't exist
 	@$(GCLOUD) iam service-accounts describe $(SA) >/dev/null 2>&1 \
 	  && echo "Service account $(SA) already exists" \
 	  || $(GCLOUD) iam service-accounts create $(SA_NAME)
 
-secret: require-PROJECT_ID ## Store the CDD token in Secret Manager (prompts; adds a new version if it exists)
+secret: check-config ## Store the CDD token in Secret Manager (prompts; adds a new version if it exists)
 	@read -rsp "CDD API token: " T; echo; \
 	if $(GCLOUD) secrets describe $(SECRET_NAME) >/dev/null 2>&1; then \
 	  printf '%s' "$$T" | $(GCLOUD) secrets versions add $(SECRET_NAME) --data-file=-; \
@@ -71,12 +102,12 @@ secret: require-PROJECT_ID ## Store the CDD token in Secret Manager (prompts; ad
 
 # Used by `setup`: `iam` needs the secret to exist, but re-running setup must not ask
 # for the token again (to replace the token: `make secret`).
-secret-if-missing: require-PROJECT_ID
+secret-if-missing: check-config
 	@$(GCLOUD) secrets describe $(SECRET_NAME) >/dev/null 2>&1 \
 	  && echo "Secret $(SECRET_NAME) already exists (to replace the token: make secret)" \
 	  || $(MAKE) --no-print-directory secret
 
-iam: require-PROJECT_ID require-BUCKET_NAME ## Give the job's service account its permissions, and let you deploy it
+iam: check-config require-BUCKET_NAME ## Give the job's service account its permissions, and let you deploy it
 	@$(GCLOUD) secrets describe $(SECRET_NAME) >/dev/null 2>&1 \
 	  || { echo "Secret $(SECRET_NAME) doesn't exist yet: run make secret first" >&2; exit 1; }
 	$(GCLOUD) secrets add-iam-policy-binding $(SECRET_NAME) \
@@ -89,13 +120,13 @@ iam: require-PROJECT_ID require-BUCKET_NAME ## Give the job's service account it
 	$(GCLOUD) iam service-accounts add-iam-policy-binding $(SA) \
 	  --member=user:$(ME) --role=roles/iam.serviceAccountUser --format=none
 
-builder-role: require-PROJECT_ID ## Let the default compute account build from source (roles/run.builder)
+builder-role: check-config ## Let the default compute account build from source (roles/run.builder)
 	$(GCLOUD) projects add-iam-policy-binding $(PROJECT_ID) \
 	  --member=serviceAccount:$(COMPUTE_SA) --role=roles/run.builder --condition=None --format=none
 
 # --- Deploy and run ----------------------------------------------------------
 
-deploy: require-PROJECT_ID require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the Cloud Run job (no schedule)
+deploy: check-config require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the Cloud Run job (no schedule)
 	@test -f Dockerfile || { echo "No Dockerfile here: run make from the project folder" >&2; exit 1; }
 	@# "^@^" makes @ the separator between env vars, because EXPORTS itself contains commas
 	$(GCLOUD) run jobs deploy $(JOB_NAME) \
@@ -108,7 +139,7 @@ deploy: require-PROJECT_ID require-REGION require-BUCKET_NAME require-CDD_VAULT_
 	  --memory $(MEMORY) \
 	  --max-retries 0
 
-deploy-verify: require-PROJECT_ID require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the verification job (no schedule)
+deploy-verify: check-config require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the verification job (no schedule)
 	@test -f Dockerfile || { echo "No Dockerfile here: run make from the project folder" >&2; exit 1; }
 	@# Same image and service account as the backup (it only reads the bucket and CDD)
 	$(GCLOUD) run jobs deploy $(VERIFY_JOB_NAME) \
@@ -122,41 +153,44 @@ deploy-verify: require-PROJECT_ID require-REGION require-BUCKET_NAME require-CDD
 	  --memory $(VERIFY_MEMORY) \
 	  --max-retries 0
 
-run: require-PROJECT_ID require-REGION ## Execute the job once and wait for it to finish
+run: check-config require-REGION ## Execute the job once and wait for it to finish
 	$(GCLOUD) run jobs execute $(JOB_NAME) --region $(REGION) --wait
 
-run-verify: require-PROJECT_ID require-REGION ## Execute the verification job once and wait
+run-verify: check-config require-REGION ## Execute the verification job once and wait
 	$(GCLOUD) run jobs execute $(VERIFY_JOB_NAME) --region $(REGION) --wait
 
-executions: require-PROJECT_ID require-REGION ## List recent executions of the job
+executions: check-config require-REGION ## List recent executions of the job
 	$(GCLOUD) run jobs executions list --job $(JOB_NAME) --region $(REGION)
 
 LOG_LIMIT ?= 100
 
-logs: require-PROJECT_ID ## Last week of logs of both jobs, newest first (JOB=backup or JOB=verify for one; LOG_LIMIT=100)
+logs: check-config ## Last week of logs of both jobs, newest first (JOB=backup or JOB=verify for one; LOG_LIMIT=100)
 	@# jsonPayload.message is the backup summary (logged as JSON); everything else is textPayload
 	@# (textPayload:* OR jsonPayload.message:*) drops Cloud Run's own events, which have no text
 	$(GCLOUD) logging read 'resource.type="cloud_run_job" AND resource.labels.job_name=($(if $(filter verify,$(JOB)),,"$(JOB_NAME)") $(if $(JOB),,OR) $(if $(filter backup,$(JOB)),,"$(VERIFY_JOB_NAME)")) AND (textPayload:* OR jsonPayload.message:*)' \
 	  --limit $(LOG_LIMIT) --freshness 7d --format='value(timestamp,resource.labels.job_name,textPayload,jsonPayload.message)'
 
-list-backups: require-PROJECT_ID require-BUCKET_NAME ## List the files in the backup bucket
+list-backups: check-config require-BUCKET_NAME ## List the files in the backup bucket
 	$(GCLOUD) storage ls -l "gs://$(BUCKET_NAME)/backups/**"
 
 # --- Local development ------------------------------------------------------
 
+# These run on your computer. `uv run` uses the project's own Python 3.14 and packages
+# (installing them the first time), so no virtual environment needs activating.
+
 local: require-CDD_VAULT_ID ## Run main.py locally into ./backups (needs CDD_API_TOKEN exported in your shell)
 	@test -n "$$CDD_API_TOKEN" || { echo "Export CDD_API_TOKEN first" >&2; exit 1; }
-	CDD_VAULT_ID=$(CDD_VAULT_ID) EXPORTS=$(EXPORTS) LOCAL_OUTPUT_DIR=./backups python main.py
+	CDD_VAULT_ID=$(CDD_VAULT_ID) EXPORTS=$(EXPORTS) LOCAL_OUTPUT_DIR=./backups uv run python main.py
 
 verify: require-BUCKET_NAME require-CDD_VAULT_ID ## Check a stored backup locally (newest full run, or RUN=<run id>). Needs `gcloud auth application-default login` once
 	@# Live counts vs CDD only if CDD_API_TOKEN is exported in your shell
-	python verify_backup.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
+	uv run python verify_backup.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN))
 
 exit-kit: require-BUCKET_NAME require-CDD_VAULT_ID ## Convert a backup run to SDF/CSV/files in ./exit_kit/<run>, then check it (RUN=<run id>; CHECK_STRUCTURES=1 adds RDKit)
-	python exit_kit.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN)) $(if $(CHECK_STRUCTURES),--check-structures)
+	uv run python exit_kit.py --bucket $(BUCKET_NAME) --vault $(CDD_VAULT_ID) $(if $(RUN),--run $(RUN)) $(if $(CHECK_STRUCTURES),--check-structures)
 
-lint: ## Run ruff (check + format check)
-	ruff check . && ruff format --check .
+lint: ## Run ruff (check + format check), the version pinned in pyproject.toml
+	uv run ruff check . && uv run ruff format --check .
 
 # --- Schedule (Mon-Fri) -------------------------------------------------------
 # Run `make deploy` and a successful manual `make run` before `make schedule`.
@@ -188,19 +222,19 @@ define schedule_job
 	  --oauth-service-account-email $(SCHEDULER_SA)
 endef
 
-schedule: require-PROJECT_ID require-REGION ## Create or update the backup's Cloud Scheduler trigger (Mon-Fri 02:00 by default)
+schedule: check-config require-REGION ## Create or update the backup's Cloud Scheduler trigger (Mon-Fri 02:00 by default)
 	$(call schedule_job,$(JOB_NAME),$(SCHEDULER_NAME),$(SCHEDULE))
 
-schedule-verify: require-PROJECT_ID require-REGION ## Create or update the verification's trigger (4 h after each backup)
+schedule-verify: check-config require-REGION ## Create or update the verification's trigger (4 h after each backup)
 	$(call schedule_job,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME),$(VERIFY_SCHEDULE))
 
-schedule-run: require-PROJECT_ID ## Trigger the Scheduler job now (tests the trigger and its permissions)
+schedule-run: check-config ## Trigger the Scheduler job now (tests the trigger and its permissions)
 	$(GCLOUD) scheduler jobs run $(SCHEDULER_NAME) --location $(SCHEDULER_REGION)
 
-schedule-pause: require-PROJECT_ID ## Pause the scheduled trigger
+schedule-pause: check-config ## Pause the scheduled trigger
 	$(GCLOUD) scheduler jobs pause $(SCHEDULER_NAME) --location $(SCHEDULER_REGION)
 
-schedule-resume: require-PROJECT_ID ## Resume the scheduled trigger
+schedule-resume: check-config ## Resume the scheduled trigger
 	$(GCLOUD) scheduler jobs resume $(SCHEDULER_NAME) --location $(SCHEDULER_REGION)
 
 # --- Email alerts -------------------------------------------------------------
@@ -225,7 +259,7 @@ VERIFY_SCHED_ALERT_NAME  = $(VERIFY_JOB_NAME) trigger failed
 # The job and scheduler names default to the backup's.
 create_policy = if [ -n "$$($(GCLOUD) alpha monitoring policies list --filter='displayName="$(1)"' --format='value(name)')" ]; then echo "Policy '$(1)' already exists, skipping"; else F=$$(mktemp); sed -e "s|__DISPLAY_NAME__|$(1)|" -e "s|__JOB_NAME__|$(or $(3),$(JOB_NAME))|g" -e "s|__SCHEDULER_NAME__|$(or $(4),$(SCHEDULER_NAME))|g" -e "s|__CHANNEL__|$$CH|" $(2) > $$F; $(GCLOUD) alpha monitoring policies create --policy-from-file=$$F; rm -f $$F; fi
 
-alerts: require-PROJECT_ID require-ALERT_EMAIL ## Create the email channel and the five alert policies (skips existing ones)
+alerts: check-config require-ALERT_EMAIL ## Create the email channel and the five alert policies (skips existing ones)
 	@set -e; \
 	CH=$$($(GCLOUD) beta monitoring channels list --filter='displayName="$(ALERT_CHANNEL_NAME)"' --format='value(name)'); \
 	if [ -z "$$CH" ]; then \
