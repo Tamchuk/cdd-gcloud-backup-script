@@ -40,7 +40,7 @@ PROJECT_NUMBER  = $(shell gcloud projects describe $(PROJECT_ID) --format='value
 COMPUTE_SA      = $(PROJECT_NUMBER)-compute@developer.gserviceaccount.com
 ME              = $(shell gcloud config get-value account 2>/dev/null)
 
-.PHONY: help config check-config setup apis bucket service-account secret secret-if-missing iam builder-role \
+.PHONY: help config check-config setup apis bucket registry service-account secret secret-if-missing iam builder-role \
         deploy deploy-verify run run-verify executions logs list-backups local verify exit-kit lint \
         schedule schedule-verify schedule-run schedule-pause schedule-resume alerts
 
@@ -74,7 +74,7 @@ config: ## Show the settings in use. Run this first: it tells you which project 
 
 # --- One-time setup (safe to re-run) ---------------------------------------
 
-setup: apis bucket service-account secret-if-missing iam builder-role ## All one-time setup (asks for the CDD token if none is stored yet)
+setup: apis bucket registry service-account secret-if-missing iam builder-role ## All one-time setup (asks for the CDD token if none is stored yet)
 
 apis: check-config ## Enable the Google Cloud APIs this project needs
 	$(GCLOUD) services enable run.googleapis.com cloudbuild.googleapis.com \
@@ -86,6 +86,20 @@ bucket: check-config require-REGION require-BUCKET_NAME ## Create the backup buc
 	  && echo "Bucket gs://$(BUCKET_NAME) already exists" \
 	  || $(GCLOUD) storage buckets create gs://$(BUCKET_NAME) --location=$(REGION) \
 	       --uniform-bucket-level-access --public-access-prevention
+
+# The repository `--source` deploys store their images in. `make deploy` would create it
+# itself, but only after asking y/n; creating it here also adds the cleanup policy
+# (registry-cleanup.json: keeps the newest 5 images per job, deletes older ones after
+# 30 days). Note: anything else in this project deployed from source in REGION shares it.
+REGISTRY_REPO ?= cloud-run-source-deploy
+
+registry: check-config require-REGION ## Create the image repository deploys use, with its cleanup policy
+	@$(GCLOUD) artifacts repositories describe $(REGISTRY_REPO) --location $(REGION) >/dev/null 2>&1 \
+	  && echo "Repository $(REGISTRY_REPO) already exists" \
+	  || $(GCLOUD) artifacts repositories create $(REGISTRY_REPO) --location $(REGION) \
+	       --repository-format=docker --description="Images built by make deploy (Cloud Run source deploys)"
+	$(GCLOUD) artifacts repositories set-cleanup-policies $(REGISTRY_REPO) --location $(REGION) \
+	  --policy=registry-cleanup.json --no-dry-run --format=none
 
 service-account: check-config ## Create the job's runtime service account if it doesn't exist
 	@$(GCLOUD) iam service-accounts describe $(SA) >/dev/null 2>&1 \

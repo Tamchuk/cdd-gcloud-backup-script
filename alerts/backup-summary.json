@@ -20,7 +20,7 @@
   },
   "documentation": {
     "subject": "CDD backup ${log.extracted_label.status}",
-    "content": "${log.extracted_label.summary}\n\nSizes are uncompressed and compared with the previous complete backup. A backup file without a .done marker is a partial.",
+    "content": "${log.extracted_label.summary}\n\nRecords and sizes are compared with the previous complete backup; fewer records means WARNING. Size is uncompressed, Stored is the size in the bucket. A backup file without a .done marker is a partial.",
     "mimeType": "text/markdown"
   }
 }

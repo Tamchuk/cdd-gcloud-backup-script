@@ -20,6 +20,7 @@ Failures email the owner via Cloud Monitoring alerts.
 | `Makefile` | Setup, deploy, run, logs, schedule, alerts. `make help` lists targets |
 | `config.mk` | Your settings (REGION, BUCKET_NAME, CDD_VAULT_ID, ...). **Not committed.** See `config.mk.example`. Make evaluates it, so treat it as code |
 | `alerts/*.json` | Cloud Monitoring alert policy templates. `__PLACEHOLDERS__` are filled in by `make alerts` |
+| `registry-cleanup.json` | Artifact Registry cleanup policy for `cloud-run-source-deploy`, applied by `make registry` (part of `setup`): keep the newest 5 images per package, delete older than 30 days. `make setup` creates that repository so the first `make deploy` doesn't stop at a y/n prompt. The repo is shared with any other source deploys in the project/region. Applied to the test project 2026-10-22 (works; not a dry run) |
 | `.dockerignore`, `.gcloudignore` | `.gcloudignore` controls what `--source .` **uploads**; `.dockerignore` only controls the image build context. Keep secrets and `config.mk` out of both |
 
 ## How it works (and why)
@@ -55,9 +56,14 @@ Failures email the owner via Cloud Monitoring alerts.
   `main()` turns SIGTERM into `KeyboardInterrupt` so `except BaseException` cleanup runs (Cloud Run gives ~10 s before SIGKILL).
 - **Fail loudly:** all exports are attempted; if any failed the script exits 1, which marks the Cloud Run execution failed and triggers the email alert.
 - **Summary email after every run:** `log_summary` prints one JSON line to stdout (`jsonPayload.event="backup_summary"`)
-  with each export's size vs the previous complete backup (the newest earlier `.done` marker; no extra size history is stored).
-  Status is `WARNING` if an export got smaller, failed, or previous sizes couldn't be read. The log-based alert
-  `alerts/backup-summary.json` emails it. A shrink doesn't change the exit code; a failed run sends both the failed alert and the summary.
+  with a **markdown table** (renders in the alert email; tested 2026-10-22): per export the record count and its change,
+  size, stored size and size change, vs the previous complete backup (the newest earlier `.done` marker). Nothing extra is
+  stored: `record_count` reads the count back from the stored files (bulk exports start with `{"count":N`; small reference
+  data is read whole), for this run and the previous one. Status is `WARNING` if an export has **fewer records**, failed,
+  or previous sizes couldn't be read; a smaller size with the same records is only shown. Exports without a count
+  (`fields`, a single object; the ELN zip) fall back to warning on a smaller size. The log-based alert
+  `alerts/backup-summary.json` emails it. A warning doesn't change the exit code; a failed run sends both the failed alert
+  and the summary.
 - **Poll tolerance:** up to 5 consecutive failed status checks are tolerated; unexpected statuses show up in the logs.
 - **Deploy with `--max-retries 0`** so a failed run doesn't immediately start a second export behind the first. The next scheduled run is the retry.
 - **`--task-timeout` must exceed** (number of exports x 2 h) plus download time. Default in the Makefile is 12h.
@@ -150,8 +156,9 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
   reference data (no list was big enough) and the ELN zip.
   **Not yet seen in practice: a cancel (DELETE) returning 2xx.**
 - Summary alert verified 2026-10-15 (OK and WARNING emails received; subject is
-  `[ALERT - No severity] CDD backup <status>`). An 18-line (~1.3 KB) summary arrived complete; the exact
-  limit is still unknown, so keep the lines short.
+  `[ALERT - No severity] CDD backup <status>`). Summaries of ~1.3 KB (list) and ~1.5 KB (19-row fixed-width table,
+  test 2026-10-22) arrived complete; the exact limit is still unknown, so keep rows short. The markdown table
+  (~1.2-1.3 KB for 19 exports) renders well in the email.
 - The "failed" alerts send **two** emails per failure: one when it opens, and an "alert recovered" one about 10 minutes
   later when the next metric window shows no new failure. Kept on purpose (no `notificationPrompts: ["OPENED"]`).
 - Verify-failed alert verified 2026-10-15 (`cdd-backup-verify-z9s85`, run with `MAX_AGE_DAYS=0.001`): both emails arrived.

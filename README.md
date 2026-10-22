@@ -33,8 +33,8 @@ exports look like `{"count": N, "objects": [...]}`.
 
 | Email | Meaning | What to do |
 |---|---|---|
-| **CDD backup OK** | Backup finished. Lists each export's size and the change since the previous backup | Nothing |
-| **CDD backup WARNING** | Something failed, got smaller, or couldn't be compared | Read the WARNING lines. "Smaller" can be real (data deleted in CDD) or a problem (e.g. the backup user lost access to a project) |
+| **CDD backup OK** | Backup finished. A table with each export's number of records and size, and the change since the previous backup | Nothing |
+| **CDD backup WARNING** | An export failed, has **fewer records** than last time, or couldn't be compared | Read the WARNING lines. Fewer records can be real (records deleted in CDD) or a problem (e.g. the backup user lost access to a project). A smaller size with the same records is shown in the table but isn't a warning |
 | **cdd-backup failed** | The backup job failed | Look at the summary email from the same night and `make logs JOB=backup`. The next scheduled run retries |
 | **cdd-backup-verify failed** | The newest backup failed a check, or no recent backup exists ("age") | `make logs JOB=verify`, look for FAIL lines |
 | **... trigger failed** | Cloud Scheduler couldn't start a job | Check the schedule in the Cloud Console, or re-run `make schedule` / `make schedule-verify` |
@@ -93,7 +93,8 @@ In this order; each step can be re-run safely:
 
 ```bash
 make config           # right project, bucket, vault and email? Fix config.mk first if not
-make setup            # APIs, bucket, service account, CDD token, permissions (needs project owner rights).
+make setup            # APIs, bucket, image repository, service account, CDD token, permissions
+                      # (needs project owner rights).
                       # The first time, it asks you to paste the CDD API token: NOTHING APPEARS while you
                       # paste or type (that's normal), then press Enter. Re-running setup doesn't ask again
 make alerts           # the emails (uses ALERT_EMAIL). Before the first run, so you hear about it if it fails
@@ -174,8 +175,10 @@ the inputs and the fit results are kept).
 ## Costs
 
 About $1-2 per month in total for one vault (mostly storage: ~410 MB per run, kept for the lifecycle period),
-with Cloud Run time inside the free allowance. Old container images from deploys accumulate in Artifact Registry;
-a cleanup policy there keeps that near zero.
+with Cloud Run time inside the free allowance. Every deploy stores a new container image (~40-200 MB) in the
+`cloud-run-source-deploy` repository; `make setup` gives it a cleanup policy (`registry-cleanup.json`: keep the
+newest 5 per job, delete older ones after 30 days). That repository is shared with anything else in the project
+deployed from source in the same region, and the policy applies to those images too.
 
 ## More detail
 

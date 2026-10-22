@@ -41,6 +41,7 @@ import re
 import signal
 import sys
 import time
+from collections import Counter
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -491,20 +492,21 @@ def backup_files(session, cfg, name, object_name):
     ):
         gz.write(raw)
     write_done_marker(cfg, name, object_name, len(raw))
-    return len(raw), f"{len(listing)} files, {_size(total)}"
+    log.info("[files] %d files, %s", len(listing), _size(total))
+    return len(raw)
 
 
 def run_export(session, cfg, name, object_name):
-    """Back up one export. Returns (uncompressed bytes, note for the summary)."""
+    """Back up one export. Returns its uncompressed size in bytes."""
     how = EXPORT_SOURCES[name][0]
     if how == "files":
         return backup_files(session, cfg, name, object_name)
     if how == "sync":
-        return fetch_reference(session, cfg, name, object_name), ""
+        return fetch_reference(session, cfg, name, object_name)
     export_id = start_export(session, cfg, name)
     try:
         wait_for_export(session, cfg, name, export_id)
-        return download_export(session, cfg, name, export_id, object_name), ""
+        return download_export(session, cfg, name, export_id, object_name)
     except BaseException:
         # Errors, timeouts and SIGTERM: don't leave an orphaned export in CDD's queue
         cancel_export(session, cfg, export_id)
@@ -514,6 +516,12 @@ def run_export(session, cfg, name, object_name):
 # --- Run summary ------------------------------------------------------------
 # Compares each export with the previous complete backup, using the .done
 # markers that already exist. Nothing extra is stored.
+
+
+def export_object(cfg, run_id, name):
+    """Where an export of a run is stored, e.g. backups/<run>/vault-1234-molecules.json.gz."""
+    ext = ".zip" if name in ZIP_EXPORTS else ".json.gz"
+    return f"backups/{run_id}/vault-{cfg.vault_id}-{name}{ext}"
 
 
 def stored_size(cfg, object_name):
@@ -539,8 +547,37 @@ def _read_marker(cfg, path):
     return int(text.split()[0])
 
 
+def record_count(cfg, object_name):
+    """Number of records in a stored .json.gz export, or None if it has no list.
+
+    Read back from the stored file, so it works the same for this run and the
+    previous one. Bulk exports start with their count ({"count":N,...}): only the
+    first bytes are read. Small reference data is read whole.
+    """
+    if not object_name.endswith(".json.gz"):
+        return None  # e.g. the ELN zip
+    with open_stored(cfg, object_name) as raw, gzip.GzipFile(fileobj=raw) as gz:
+        head = gz.read(200)
+        match = re.match(rb'\s*\{\s*"count"\s*:\s*(\d+)', head)
+        if match:
+            return int(match.group(1))
+        rest = gz.read(50_000_000)
+        if gz.read(1):
+            return None  # big and without a leading count: not worth reading whole
+        data = json.loads(head + rest)
+    if isinstance(data, dict) and isinstance(data.get("objects"), list):
+        return len(data["objects"])
+    return len(data) if isinstance(data, list) else None  # a single object (fields)
+
+
+def files_bytes(cfg, list_object):
+    """Total size of the attached files, from a run's files list."""
+    with open_stored(cfg, list_object) as raw, gzip.GzipFile(fileobj=raw) as gz:
+        return sum(f["bytes"] for f in json.load(gz)["objects"])
+
+
 def previous_sizes(cfg, run_id):
-    """Latest complete backup before this run, per export: {name: (run_id, uncompressed bytes)}.
+    """Latest complete backup before this run, per export: {name: (run_id, object, uncompressed bytes)}.
 
     Only runs with a .done marker count, so partials are skipped. Only the
     newest marker per export is read.
@@ -571,8 +608,12 @@ def previous_sizes(cfg, run_id):
         if name not in latest or prev_run > latest[name][0]:
             latest[name] = (prev_run, path)
 
+    def object_name(path):  # relative to the bucket/folder, as open_stored expects
+        path = os.path.relpath(path, cfg.local_dir) if cfg.local_dir else path
+        return path.replace(os.sep, "/").removesuffix(".done")
+
     return {
-        name: (prev_run, _read_marker(cfg, path))
+        name: (prev_run, object_name(path), _read_marker(cfg, path))
         for name, (prev_run, path) in latest.items()
     }
 
@@ -584,10 +625,30 @@ def _size(n):
     return f"{n} B"
 
 
+def _fmt(count):
+    return "" if count is None else f"{count:,}"
+
+
+def _signed_size(n):
+    return ("+" if n >= 0 else "-") + _size(abs(n))
+
+
+def _count_or_none(cfg, object_name):
+    try:
+        return record_count(cfg, object_name)
+    except Exception:  # a count is only for the report: never fail the summary
+        log.warning("Could not count records in %s", object_name, exc_info=True)
+        return None
+
+
 def log_summary(cfg, run_id, results, failures):
     """Log one structured summary line; a Cloud Monitoring alert emails it.
 
-    results: {name: (uncompressed bytes, stored bytes, note)} for successful exports.
+    The summary is a markdown table (the alert email renders it): per export the
+    number of records and its change, and the sizes and their change, compared
+    with the previous complete backup. WARNING on fewer records or a failure.
+
+    results: {name: (uncompressed bytes, stored bytes)} for successful exports.
     """
     warnings = []
     try:
@@ -597,37 +658,65 @@ def log_summary(cfg, run_id, results, failures):
         previous = {}
         warnings.append("could not read previous backup sizes")
 
-    lines = []
+    rows, compared_with = [], Counter()
     for name in cfg.exports:
         if name in failures:
-            lines.append(f"{name}: FAILED")
+            rows.append((name, "FAILED", "", "", "", ""))
             warnings.append(f"{name} failed")
             continue
-        raw, gz, note = results[name]
-        stored_as = "zip" if name in ZIP_EXPORTS else "gz"
-        # files: the note has the file count and size; raw is the size of its list
-        line = f"{name}: {note}, list" if note else f"{name}:"
-        line += f" {_size(raw)} ({_size(gz)} {stored_as})"
-        if name in previous:
-            prev_run, prev_raw = previous[name]
-            diff = raw - prev_raw
-            change = diff / prev_raw * 100 if prev_raw else 0.0
-            # Exact bytes too: tiny changes round to 0.0%. Kept short: the alert
-            # email has a size limit and there is one line per export
-            line += f", {diff:+,} bytes ({change:+.1f}%) vs {prev_run[:10]}"
-            if diff < 0:
+        size, stored = results[name]
+        current = export_object(cfg, run_id, name)
+        count = _count_or_none(cfg, current)
+        if (
+            name == "files"
+        ):  # its marker is the size of the list: show the files instead
+            size = stored = files_bytes(cfg, current)
+        if name not in previous:
+            rows.append((name, _fmt(count), "new", _size(size), _size(stored), ""))
+            continue
+
+        prev_run, prev_object, prev_size = previous[name]
+        compared_with[prev_run] += 1
+        prev_count = _count_or_none(cfg, prev_object)
+        if name == "files":
+            prev_size = files_bytes(cfg, prev_object)
+        when = prev_run[:10]
+        if count is not None and prev_count is not None:
+            change = f"{count - prev_count:+,}"
+            if count < prev_count:
                 warnings.append(
-                    f"{name} is {-diff:,} bytes ({-change:.1f}%) smaller"
-                    f" than on {prev_run[:10]}"
+                    f"{name}: {prev_count - count:,} fewer records than on {when}"
                 )
-        else:
-            line += ", no previous backup"
-        lines.append(line)
+        else:  # no record count (e.g. a single object or a zip): judge by size
+            change = ""
+            if size < prev_size:
+                warnings.append(
+                    f"{name} is {_size(prev_size - size)} smaller than on {when}"
+                )
+        rows.append(
+            (
+                name,
+                _fmt(count),
+                change,
+                _size(size),
+                _size(stored),
+                _signed_size(size - prev_size),
+            )
+        )
 
     status = "WARNING" if warnings else "OK"
-    # Markdown list: the alert email renders markdown, which would merge plain lines
-    summary = f"Vault {cfg.vault_id}, run {run_id}: {status}\n\n" + "\n".join(
-        [f"- WARNING: {w}" for w in warnings] + [f"- {line}" for line in lines]
+    header = f"Vault {cfg.vault_id}, run {run_id}: {status}"
+    if compared_with:
+        header += f" (compared with {compared_with.most_common(1)[0][0]})"
+    # Markdown: the alert email renders lists and tables
+    summary = (
+        header
+        + "\n\n"
+        + "".join(f"- WARNING: {w}\n" for w in warnings)
+        + ("\n" if warnings else "")
+        + "| Export | Records | Change | Size | Stored | Size change |\n"
+        + "|:--|--:|--:|--:|--:|--:|\n"
+        + "\n".join("| " + " | ".join(row) + " |" for row in rows)
     )
     # A JSON line on stdout becomes a structured log entry (jsonPayload) in Cloud Logging
     entry = {
@@ -653,11 +742,10 @@ def main():
     results = {}
 
     for name in cfg.exports:
-        ext = ".zip" if name in ZIP_EXPORTS else ".json.gz"
-        object_name = f"backups/{run_id}/vault-{cfg.vault_id}-{name}{ext}"
+        object_name = export_object(cfg, run_id, name)
         try:
-            raw, note = run_export(session, cfg, name, object_name)
-            results[name] = (raw, stored_size(cfg, object_name), note)
+            raw = run_export(session, cfg, name, object_name)
+            results[name] = (raw, stored_size(cfg, object_name))
         except (
             Exception
         ):  # KeyboardInterrupt (SIGTERM) is NOT caught: it aborts the run
