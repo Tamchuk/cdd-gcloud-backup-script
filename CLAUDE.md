@@ -3,7 +3,8 @@
 Workday backup (Mon-Fri 02:00 Asia/Jerusalem, i.e. after each Sun-Thu workday) of Collaborative Drug Discovery (CDD) Vault data to Google Cloud Storage.
 A Python script (`main.py`) runs as a **Cloud Run Job**, triggered by **Cloud Scheduler**,
 and streams CDD data (async exports plus small reference lists, gzip-compressed JSON, plus attached/source files)
-into a bucket. A second job (`verify_backup.py`, Mon-Fri 06:00) checks the newest backup can be restored.
+into a bucket. A second job (`verify_backup.py`, Mon-Fri 06:00) checks the newest backup can be restored, and a
+third (`exit_kit.py`, the 1st of each month 08:00) checks it still converts into standard formats.
 Failures email the owner via Cloud Monitoring alerts.
 
 ## Files
@@ -13,7 +14,7 @@ Failures email the owner via Cloud Monitoring alerts.
 | `README.md` | For people operating this (not Claude): emails and what to do, new computer, access, routine tasks. **Update it when commands, schedules, emails or setup steps change** |
 | `main.py` | The backup: start export -> poll -> stream to GCS, gzip on the fly; then reference data and files; then the summary |
 | `verify_backup.py` | Restore check of a stored run (see "Verification" below). Imports the export table and helpers from `main.py` |
-| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally only (`make exit-kit`); reuses `Source`/`pick_run` from `verify_backup.py`. Ends with `check_output`: reads its output back with plain CSV/SDF parsing and compares with the backup (counts, ~0.2% sampled values/links, plate labels, file sizes); exit 1 on any difference. Keep that check independent of the writing code |
+| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally (`make exit-kit`) and monthly as the Cloud Run job `cdd-backup-exit-kit` (`--out /tmp/exit-kit`: the app folder isn't writable, /tmp is in memory, so 8Gi + 2 CPU; no CDD token; output discarded on purpose: the JSON is the master copy). Reuses `Source`/`pick_run` from `verify_backup.py`. Ends with `check_output`: reads its output back with plain CSV/SDF parsing and compares with the backup (counts, ~0.2% sampled values/links, plate labels, file sizes); exit 1 on any difference. Keep that check independent of the writing code |
 | `check_structures.py` | Optional RDKit check of `compounds.sdf` (InChIKey vs CDD's), run by `exit_kit.py --check-structures` via `uv run --with rdkit` (RDKit is not a project dependency). Baseline 2026-10-16: 53 of 253,788 differ (stereo/isotope, exotic) |
 | `Dockerfile` | Required. Without it, `--source .` falls back to buildpacks, which start a web server and the job dies with exit code 127. Runs as non-root user `app` |
 | `requirements.txt` | `google-cloud-storage`, `requests`, `ijson` (streaming JSON parser) for the image; no Secret Manager client: the token is injected as an env var. Keep in sync with `pyproject.toml` (uv) |
@@ -94,15 +95,19 @@ make setup           # APIs, bucket, service account, token (asked only if no se
 make secret          # prompts for the CDD token and stores it as a new secret version (to replace the token)
 make deploy          # build from source and deploy the job (no schedule)
 make run             # execute the job once and wait
-make logs            # last week of logs of both jobs, with the job name (JOB=backup|verify, LOG_LIMIT=100)
+make logs            # last week of logs of all jobs, newest first, with the job name
+                     # (JOB=backup|verify|exit-kit, LOG_LIMIT=100, LOG_DAYS=7)
 make list-backups    # list objects in the bucket
 make schedule        # Cloud Scheduler trigger, Mon-Fri 02:00 (do this only after a good manual run).
                      # Its name stays cdd-backup-weekly: the trigger-failed alert filters on that name
-make alerts          # email channel + five alert policies: backup failed / trigger failed / summary,
+make alerts          # email channel + seven alert policies: backup failed / trigger failed / summary,
+                     # exit-kit failed / exit-kit trigger failed,
                      # verify failed / verify trigger failed (needs ALERT_EMAIL; skips existing ones)
 make deploy-verify   # build and deploy the verification job
 make run-verify      # execute the verification job once and wait
 make schedule-verify # its trigger, Mon-Fri 06:00 (4 h after the backup starts)
+make deploy-exit-kit / run-exit-kit / schedule-exit-kit   # the monthly exit-kit check (1st, 08:00)
+make logs JOB=exit-kit   # looks back 35 days by default (it runs monthly)
 make verify          # run the verification locally (RUN=<run id> for a specific run)
 make exit-kit        # convert a run to SDF/CSV/files in ./exit_kit/<run>, then self-check
                      # (RUN=<run id>; CHECK_STRUCTURES=1 adds RDKit; local only)
@@ -124,9 +129,9 @@ Local test without GCP: `CDD_API_TOKEN=... CDD_VAULT_ID=... EXPORTS=molecules LO
 
 1. **You** (deployer): needs `roles/iam.serviceAccountUser` on `cdd-backup-sa` to deploy a job that runs as it.
 2. **Default compute service account** (`<project-number>-compute@developer.gserviceaccount.com`): does the **build** for `--source` deploys; needs `roles/run.builder` (project-wide, the broadest grant here).
-3. **`cdd-backup-sa`** (runtime of **both** jobs): `secretmanager.secretAccessor` on the one secret, `storage.objectCreator` + `storage.objectViewer` on the one bucket. Nothing else.
+3. **`cdd-backup-sa`** (runtime of **all three** jobs): `secretmanager.secretAccessor` on the one secret, `storage.objectCreator` + `storage.objectViewer` on the one bucket. Nothing else. (The exit-kit job isn't given the token.)
 
-Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
+Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the three jobs only.
 
 ## Gotchas already hit
 
@@ -162,6 +167,9 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
 - The "failed" alerts send **two** emails per failure: one when it opens, and an "alert recovered" one about 10 minutes
   later when the next metric window shows no new failure. Kept on purpose (no `notificationPrompts: ["OPENED"]`).
 - Verify-failed alert verified 2026-10-15 (`cdd-backup-verify-z9s85`, run with `MAX_AGE_DAYS=0.001`): both emails arrived.
+- Exit-kit job confirmed on the test project 2026-10-24 (`cdd-backup-exit-kit-9b4kk`: ~5.5 min, all 9 checks passed,
+  439 files). Its failed alert verified 2026-10-24 (`cdd-backup-exit-kit-qt2kc`, run with
+  `--args "exit_kit.py,--out,/tmp/exit-kit,--run,doesnotexist"`: exit 1, email arrived). Its schedule isn't set up on the test project.
 - Failed-execution alert verified 2026-10-15 with a deliberate failure
   (`gcloud run jobs execute cdd-backup --update-env-vars EXPORTS=doesnotexist`): email "Failed execution on <project>" arrived.
   An unknown export name now stops the run at startup (failed alert, no summary); to test a failed export with a summary,
@@ -178,8 +186,8 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the two jobs only.
 
 ## Rules for Claude working in this repo
 
-- `iam`, `builder-role`, `schedule`, `schedule-verify`, `alerts`, `secret`, `deploy` and `deploy-verify` change real cloud resources
-  (`run`, `run-verify` and `schedule-run` start real jobs). Show the project and the command, and get confirmation before running them.
+- `setup` (and its parts, incl. `registry`), `schedule*`, `alerts`, `secret`, `deploy`, `deploy-verify` and `deploy-exit-kit`
+  change real cloud resources (`run`, `run-verify`, `run-exit-kit` and `schedule-run` start real jobs). Show the project and the command, and get confirmation before running them.
 - Never print, log, echo or commit the CDD token. Never create service account keys.
 - Don't broaden IAM roles to make an error go away; find out which identity is missing which permission first.
 - Don't change the `.done` marker convention or add delete permission without discussing it.

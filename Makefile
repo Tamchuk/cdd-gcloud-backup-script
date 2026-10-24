@@ -33,6 +33,10 @@ MEMORY        ?= 2Gi# attached files are decoded in memory, one at a time
 VERIFY_JOB_NAME ?= $(JOB_NAME)-verify
 MAX_AGE_DAYS    ?= 2# fail if the newest complete backup is older (Mon after a failed Mon backup: Fri's is ~3 days)
 VERIFY_MEMORY   ?= 2Gi# record ids kept for the link checks (grows with the vault)
+# The monthly exit-kit check (exit_kit.py): converts the newest backup into /tmp, checks
+# it, and throws it away. /tmp is in memory on Cloud Run and the kit is over 2 GB
+EXIT_KIT_JOB_NAME ?= $(JOB_NAME)-exit-kit
+EXIT_KIT_MEMORY   ?= 8Gi# Cloud Run needs at least 2 CPUs above 4Gi
 
 GCLOUD          = gcloud --project $(PROJECT_ID)
 SA              = $(SA_NAME)@$(PROJECT_ID).iam.gserviceaccount.com
@@ -41,8 +45,9 @@ COMPUTE_SA      = $(PROJECT_NUMBER)-compute@developer.gserviceaccount.com
 ME              = $(shell gcloud config get-value account 2>/dev/null)
 
 .PHONY: help config check-config setup apis bucket registry service-account secret secret-if-missing iam builder-role \
-        deploy deploy-verify run run-verify executions logs list-backups local verify exit-kit lint \
-        schedule schedule-verify schedule-run schedule-pause schedule-resume alerts
+        deploy deploy-verify deploy-exit-kit run run-verify run-exit-kit executions logs list-backups \
+        local verify exit-kit lint \
+        schedule schedule-verify schedule-exit-kit schedule-run schedule-pause schedule-resume alerts
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -167,22 +172,48 @@ deploy-verify: check-config require-REGION require-BUCKET_NAME require-CDD_VAULT
 	  --memory $(VERIFY_MEMORY) \
 	  --max-retries 0
 
+deploy-exit-kit: check-config require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the monthly exit-kit check (no schedule)
+	@test -f Dockerfile || { echo "No Dockerfile here: run make from the project folder" >&2; exit 1; }
+	@# Same image and service account, but no CDD token: it only reads the bucket.
+	@# Output goes to /tmp (the app folder isn't writable) and disappears with the container.
+	$(GCLOUD) run jobs deploy $(EXIT_KIT_JOB_NAME) \
+	  --source . \
+	  --region $(REGION) \
+	  --service-account $(SA) \
+	  --set-env-vars "CDD_VAULT_ID=$(CDD_VAULT_ID),BUCKET_NAME=$(BUCKET_NAME)" \
+	  --command python --args "exit_kit.py,--out,/tmp/exit-kit" \
+	  --task-timeout 1h \
+	  --memory $(EXIT_KIT_MEMORY) --cpu 2 \
+	  --max-retries 0
+
 run: check-config require-REGION ## Execute the job once and wait for it to finish
 	$(GCLOUD) run jobs execute $(JOB_NAME) --region $(REGION) --wait
 
 run-verify: check-config require-REGION ## Execute the verification job once and wait
 	$(GCLOUD) run jobs execute $(VERIFY_JOB_NAME) --region $(REGION) --wait
 
+run-exit-kit: check-config require-REGION ## Execute the exit-kit check once and wait (~5 min)
+	$(GCLOUD) run jobs execute $(EXIT_KIT_JOB_NAME) --region $(REGION) --wait
+
 executions: check-config require-REGION ## List recent executions of the job
 	$(GCLOUD) run jobs executions list --job $(JOB_NAME) --region $(REGION)
 
 LOG_LIMIT ?= 100
+# JOB=backup|verify|exit-kit picks one job; the monthly exit-kit check needs a longer look back
+LOG_JOB_backup     = $(JOB_NAME)
+LOG_JOB_verify     = $(VERIFY_JOB_NAME)
+LOG_JOB_exit-kit   = $(EXIT_KIT_JOB_NAME)
+LOG_JOBS           = $(if $(JOB),$(LOG_JOB_$(JOB)),$(LOG_JOB_backup) $(LOG_JOB_verify) $(LOG_JOB_exit-kit))
+LOG_DAYS          ?= $(if $(filter exit-kit,$(JOB)),35,7)
+empty :=
+space := $(empty) $(empty)
 
-logs: check-config ## Last week of logs of both jobs, newest first (JOB=backup or JOB=verify for one; LOG_LIMIT=100)
+logs: check-config ## Logs of all jobs, newest first (JOB=backup|verify|exit-kit for one; LOG_LIMIT=100, LOG_DAYS=7)
+	@$(if $(LOG_JOBS),:,{ echo "Unknown JOB=$(JOB): use backup, verify or exit-kit" >&2; exit 1; })
 	@# jsonPayload.message is the backup summary (logged as JSON); everything else is textPayload
 	@# (textPayload:* OR jsonPayload.message:*) drops Cloud Run's own events, which have no text
-	$(GCLOUD) logging read 'resource.type="cloud_run_job" AND resource.labels.job_name=($(if $(filter verify,$(JOB)),,"$(JOB_NAME)") $(if $(JOB),,OR) $(if $(filter backup,$(JOB)),,"$(VERIFY_JOB_NAME)")) AND (textPayload:* OR jsonPayload.message:*)' \
-	  --limit $(LOG_LIMIT) --freshness 7d --format='value(timestamp,resource.labels.job_name,textPayload,jsonPayload.message)'
+	$(GCLOUD) logging read 'resource.type="cloud_run_job" AND resource.labels.job_name=($(subst $(space), OR ,$(foreach j,$(LOG_JOBS),"$(j)"))) AND (textPayload:* OR jsonPayload.message:*)' \
+	  --limit $(LOG_LIMIT) --freshness $(LOG_DAYS)d --format='value(timestamp,resource.labels.job_name,textPayload,jsonPayload.message)'
 
 list-backups: check-config require-BUCKET_NAME ## List the files in the backup bucket
 	$(GCLOUD) storage ls -l "gs://$(BUCKET_NAME)/backups/**"
@@ -219,6 +250,9 @@ SCHEDULER_SA       = $(SCHEDULER_SA_NAME)@$(PROJECT_ID).iam.gserviceaccount.com
 # Verification: 4 h after the backup starts (a full backup takes ~75 min)
 VERIFY_SCHEDULE        ?= 0 6 * * 1-5
 VERIFY_SCHEDULER_NAME  ?= $(VERIFY_JOB_NAME)-schedule
+# Exit-kit check: the 1st of each month at 08:00 (after that night's backup and verification)
+EXIT_KIT_SCHEDULE        ?= 0 8 1 * *
+EXIT_KIT_SCHEDULER_NAME  ?= $(EXIT_KIT_JOB_NAME)-schedule
 
 # $(call schedule_job,<Cloud Run job>,<scheduler job name>,<cron schedule>)
 # Lets the scheduler's service account run the job, then creates or updates the trigger.
@@ -242,6 +276,9 @@ schedule: check-config require-REGION ## Create or update the backup's Cloud Sch
 schedule-verify: check-config require-REGION ## Create or update the verification's trigger (4 h after each backup)
 	$(call schedule_job,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME),$(VERIFY_SCHEDULE))
 
+schedule-exit-kit: check-config require-REGION ## Create or update the exit-kit check's trigger (1st of each month, 08:00)
+	$(call schedule_job,$(EXIT_KIT_JOB_NAME),$(EXIT_KIT_SCHEDULER_NAME),$(EXIT_KIT_SCHEDULE))
+
 schedule-run: check-config ## Trigger the Scheduler job now (tests the trigger and its permissions)
 	$(GCLOUD) scheduler jobs run $(SCHEDULER_NAME) --location $(SCHEDULER_REGION)
 
@@ -253,8 +290,8 @@ schedule-resume: check-config ## Resume the scheduled trigger
 
 # --- Email alerts -------------------------------------------------------------
 # 1) the job ran and failed, 2) the Scheduler could not trigger the job,
-# 3) the summary after every run (sizes vs previous backup, WARNING if smaller),
-# 4) and 5) the same as 1) and 2) for the verification job.
+# 3) the summary after every run (records and sizes vs the previous backup, WARNING if fewer records),
+# 4) and 5) the same as 1) and 2) for the verification job, 6) and 7) for the exit-kit check.
 # Existing channels/policies are left alone; delete them in the console to recreate.
 # Uses `gcloud alpha`, which may offer to install the alpha component the first time.
 
@@ -265,15 +302,17 @@ SCHED_ALERT_NAME    = $(JOB_NAME) trigger failed
 SUMMARY_ALERT_NAME  = $(JOB_NAME) summary
 VERIFY_FAILED_ALERT_NAME = $(VERIFY_JOB_NAME) failed
 VERIFY_SCHED_ALERT_NAME  = $(VERIFY_JOB_NAME) trigger failed
+EXIT_KIT_FAILED_ALERT_NAME = $(EXIT_KIT_JOB_NAME) failed
+EXIT_KIT_SCHED_ALERT_NAME  = $(EXIT_KIT_JOB_NAME) trigger failed
 
 # Policy definitions live in alerts/*.json. __PLACEHOLDERS__ are filled in here.
-# backup-failed.json and verify-failed.json share the same condition (only the email
-# text differs): keep their "conditions" blocks identical when changing one.
+# backup-failed.json, verify-failed.json and exit-kit-failed.json share the same condition
+# (only the email text differs): keep their "conditions" blocks identical when changing one.
 # $(call create_policy,<display name>,<template file>[,<job name>,<scheduler name>])
 # The job and scheduler names default to the backup's.
 create_policy = if [ -n "$$($(GCLOUD) alpha monitoring policies list --filter='displayName="$(1)"' --format='value(name)')" ]; then echo "Policy '$(1)' already exists, skipping"; else F=$$(mktemp); sed -e "s|__DISPLAY_NAME__|$(1)|" -e "s|__JOB_NAME__|$(or $(3),$(JOB_NAME))|g" -e "s|__SCHEDULER_NAME__|$(or $(4),$(SCHEDULER_NAME))|g" -e "s|__CHANNEL__|$$CH|" $(2) > $$F; $(GCLOUD) alpha monitoring policies create --policy-from-file=$$F; rm -f $$F; fi
 
-alerts: check-config require-ALERT_EMAIL ## Create the email channel and the five alert policies (skips existing ones)
+alerts: check-config require-ALERT_EMAIL ## Create the email channel and the seven alert policies (skips existing ones)
 	@set -e; \
 	CH=$$($(GCLOUD) beta monitoring channels list --filter='displayName="$(ALERT_CHANNEL_NAME)"' --format='value(name)'); \
 	if [ -z "$$CH" ]; then \
@@ -283,4 +322,6 @@ alerts: check-config require-ALERT_EMAIL ## Create the email channel and the fiv
 	$(call create_policy,$(SCHED_ALERT_NAME),alerts/scheduler-failed.json); \
 	$(call create_policy,$(SUMMARY_ALERT_NAME),alerts/backup-summary.json); \
 	$(call create_policy,$(VERIFY_FAILED_ALERT_NAME),alerts/verify-failed.json,$(VERIFY_JOB_NAME)); \
-	$(call create_policy,$(VERIFY_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME))
+	$(call create_policy,$(VERIFY_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME)); \
+	$(call create_policy,$(EXIT_KIT_FAILED_ALERT_NAME),alerts/exit-kit-failed.json,$(EXIT_KIT_JOB_NAME)); \
+	$(call create_policy,$(EXIT_KIT_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(EXIT_KIT_JOB_NAME),$(EXIT_KIT_SCHEDULER_NAME))
