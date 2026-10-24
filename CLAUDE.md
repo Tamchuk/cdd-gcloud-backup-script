@@ -14,7 +14,7 @@ Failures email the owner via Cloud Monitoring alerts.
 | `README.md` | For people operating this (not Claude): emails and what to do, new computer, access, routine tasks. **Update it when commands, schedules, emails or setup steps change** |
 | `main.py` | The backup: start export -> poll -> stream to GCS, gzip on the fly; then reference data and files; then the summary |
 | `verify_backup.py` | Restore check of a stored run (see "Verification" below). Imports the export table and helpers from `main.py` |
-| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally (`make exit-kit`) and monthly as the Cloud Run job `cdd-backup-exit-kit` (`--out /tmp/exit-kit`: the app folder isn't writable, /tmp is in memory, so 8Gi + 2 CPU; no CDD token; output discarded on purpose: the JSON is the master copy). Reuses `Source`/`pick_run` from `verify_backup.py`. Ends with `check_output`: reads its output back with plain CSV/SDF parsing and compares with the backup (counts, ~0.2% sampled values/links, plate labels, file sizes); exit 1 on any difference. Keep that check independent of the writing code |
+| `exit_kit.py` | Converts a stored run into standard formats (SDF, CSV per protocol, plates, files, JSON) in `exit_kit/<run>/` (git/gcloud/docker-ignored: research data). For "CDD is gone" and as the basis of the restore drill. Runs locally (`make exit-kit`) and monthly as the Cloud Run job `cdd-backup-exit-kit` (`--out /tmp/exit-kit`: the app folder isn't writable, /tmp is in memory, so 8Gi + 2 CPU; no CDD token; output discarded on purpose: the JSON is the master copy). On success in Cloud Run (`CLOUD_RUN_JOB` set) it logs one JSON line (`event="exit_kit_summary"`, counts as a markdown table) that `alerts/exit-kit-summary.json` emails as "CDD exit kit OK": the monthly sign that the schedule still runs. Reuses `Source`/`pick_run` from `verify_backup.py`. Ends with `check_output`: reads its output back with plain CSV/SDF parsing and compares with the backup (counts, ~0.2% sampled values/links, plate labels, file sizes); exit 1 on any difference. Keep that check independent of the writing code |
 | `check_structures.py` | Optional RDKit check of `compounds.sdf` (InChIKey vs CDD's), run by `exit_kit.py --check-structures` via `uv run --with rdkit` (RDKit is not a project dependency). Baseline 2026-10-16: 53 of 253,788 differ (stereo/isotope, exotic) |
 | `Dockerfile` | Required. Without it, `--source .` falls back to buildpacks, which start a web server and the job dies with exit code 127. Runs as non-root user `app` |
 | `requirements.txt` | `google-cloud-storage`, `requests`, `ijson` (streaming JSON parser) for the image; no Secret Manager client: the token is injected as an env var. Keep in sync with `pyproject.toml` (uv) |
@@ -100,8 +100,8 @@ make logs            # last week of logs of all jobs, newest first, with the job
 make list-backups    # list objects in the bucket
 make schedule        # Cloud Scheduler trigger, Mon-Fri 02:00 (do this only after a good manual run).
                      # Its name stays cdd-backup-weekly: the trigger-failed alert filters on that name
-make alerts          # email channel + seven alert policies: backup failed / trigger failed / summary,
-                     # exit-kit failed / exit-kit trigger failed,
+make alerts          # email channel + eight alert policies: backup failed / trigger failed / summary,
+                     # exit-kit failed / exit-kit trigger failed / exit-kit OK,
                      # verify failed / verify trigger failed (needs ALERT_EMAIL; skips existing ones)
 make deploy-verify   # build and deploy the verification job
 make run-verify      # execute the verification job once and wait
@@ -169,7 +169,8 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the three jobs only.
 - Verify-failed alert verified 2026-10-15 (`cdd-backup-verify-z9s85`, run with `MAX_AGE_DAYS=0.001`): both emails arrived.
 - Exit-kit job confirmed on the test project 2026-10-24 (`cdd-backup-exit-kit-9b4kk`: ~5.5 min, all 9 checks passed,
   439 files). Its failed alert verified 2026-10-24 (`cdd-backup-exit-kit-qt2kc`, run with
-  `--args "exit_kit.py,--out,/tmp/exit-kit,--run,doesnotexist"`: exit 1, email arrived). Its schedule isn't set up on the test project.
+  `--args "exit_kit.py,--out,/tmp/exit-kit,--run,doesnotexist"`: exit 1, email arrived). "CDD exit kit OK" email
+  verified 2026-10-24 (markdown table renders). Its schedule isn't set up on the test project.
 - Failed-execution alert verified 2026-10-15 with a deliberate failure
   (`gcloud run jobs execute cdd-backup --update-env-vars EXPORTS=doesnotexist`): email "Failed execution on <project>" arrived.
   An unknown export name now stops the run at startup (failed alert, no summary); to test a failed export with a summary,
@@ -182,7 +183,8 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the three jobs only.
   projects, and add the backup user to every new project, otherwise that data is silently missing.
 - Pending small improvement: an explicit `PROJECT_ID` in `config.mk` (the Makefile otherwise defaults to the active gcloud project).
 - A paused or deleted Scheduler job produces no error log. The verification's age check (`MAX_AGE_DAYS`) covers the
-  backup schedule; nothing covers the verification's own schedule. Check periodically that both are enabled.
+  backup schedule, and the monthly "exit kit OK" email the exit-kit schedule; nothing covers the verification's own
+  schedule (a daily OK email was rejected as noise). Check periodically that it is enabled.
 
 ## Rules for Claude working in this repo
 

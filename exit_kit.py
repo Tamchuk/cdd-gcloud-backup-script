@@ -746,6 +746,29 @@ def main():
             f"\n{fails} check(s) FAILED: don't rely on this output; see the FAIL lines above"
         )
     print("\nAll checks passed.")
+    if env("CLOUD_RUN_JOB"):
+        log_success(run_id, args.vault, kit.counts)
+
+
+def log_success(run_id, vault, counts):
+    """One JSON line for the monthly "exit kit OK" email (alerts/exit-kit-summary.json).
+
+    Only in Cloud Run (which sets CLOUD_RUN_JOB): a JSON line on stdout becomes a
+    structured log entry there. A failure is reported by the job's failed alert instead.
+    """
+    rows = "\n".join(f"| {what} | {n:,} |" for what, n in counts.items())
+    summary = (
+        f"Backup run {run_id} of vault {vault} converted to standard files; "
+        f"all checks passed.\n\n| Written | Count |\n|---|---:|\n{rows}"
+    )
+    entry = {
+        "severity": "INFO",
+        "event": "exit_kit_summary",
+        "run": run_id,
+        "summary": summary,
+        "message": summary,
+    }
+    print(json.dumps(entry), flush=True)
 
 
 if __name__ == "__main__":

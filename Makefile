@@ -291,7 +291,8 @@ schedule-resume: check-config ## Resume the scheduled trigger
 # --- Email alerts -------------------------------------------------------------
 # 1) the job ran and failed, 2) the Scheduler could not trigger the job,
 # 3) the summary after every run (records and sizes vs the previous backup, WARNING if fewer records),
-# 4) and 5) the same as 1) and 2) for the verification job, 6) and 7) for the exit-kit check.
+# 4) and 5) the same as 1) and 2) for the verification job, 6) and 7) for the exit-kit check,
+# 8) "exit kit OK" after each successful monthly exit-kit check (so a stopped schedule gets noticed).
 # Existing channels/policies are left alone; delete them in the console to recreate.
 # Uses `gcloud alpha`, which may offer to install the alpha component the first time.
 
@@ -304,6 +305,7 @@ VERIFY_FAILED_ALERT_NAME = $(VERIFY_JOB_NAME) failed
 VERIFY_SCHED_ALERT_NAME  = $(VERIFY_JOB_NAME) trigger failed
 EXIT_KIT_FAILED_ALERT_NAME = $(EXIT_KIT_JOB_NAME) failed
 EXIT_KIT_SCHED_ALERT_NAME  = $(EXIT_KIT_JOB_NAME) trigger failed
+EXIT_KIT_OK_ALERT_NAME     = $(EXIT_KIT_JOB_NAME) OK
 
 # Policy definitions live in alerts/*.json. __PLACEHOLDERS__ are filled in here.
 # backup-failed.json, verify-failed.json and exit-kit-failed.json share the same condition
@@ -312,7 +314,7 @@ EXIT_KIT_SCHED_ALERT_NAME  = $(EXIT_KIT_JOB_NAME) trigger failed
 # The job and scheduler names default to the backup's.
 create_policy = if [ -n "$$($(GCLOUD) alpha monitoring policies list --filter='displayName="$(1)"' --format='value(name)')" ]; then echo "Policy '$(1)' already exists, skipping"; else F=$$(mktemp); sed -e "s|__DISPLAY_NAME__|$(1)|" -e "s|__JOB_NAME__|$(or $(3),$(JOB_NAME))|g" -e "s|__SCHEDULER_NAME__|$(or $(4),$(SCHEDULER_NAME))|g" -e "s|__CHANNEL__|$$CH|" $(2) > $$F; $(GCLOUD) alpha monitoring policies create --policy-from-file=$$F; rm -f $$F; fi
 
-alerts: check-config require-ALERT_EMAIL ## Create the email channel and the seven alert policies (skips existing ones)
+alerts: check-config require-ALERT_EMAIL ## Create the email channel and the eight alert policies (skips existing ones)
 	@set -e; \
 	CH=$$($(GCLOUD) beta monitoring channels list --filter='displayName="$(ALERT_CHANNEL_NAME)"' --format='value(name)'); \
 	if [ -z "$$CH" ]; then \
@@ -324,4 +326,5 @@ alerts: check-config require-ALERT_EMAIL ## Create the email channel and the sev
 	$(call create_policy,$(VERIFY_FAILED_ALERT_NAME),alerts/verify-failed.json,$(VERIFY_JOB_NAME)); \
 	$(call create_policy,$(VERIFY_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(VERIFY_JOB_NAME),$(VERIFY_SCHEDULER_NAME)); \
 	$(call create_policy,$(EXIT_KIT_FAILED_ALERT_NAME),alerts/exit-kit-failed.json,$(EXIT_KIT_JOB_NAME)); \
-	$(call create_policy,$(EXIT_KIT_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(EXIT_KIT_JOB_NAME),$(EXIT_KIT_SCHEDULER_NAME))
+	$(call create_policy,$(EXIT_KIT_SCHED_ALERT_NAME),alerts/scheduler-failed.json,$(EXIT_KIT_JOB_NAME),$(EXIT_KIT_SCHEDULER_NAME)); \
+	$(call create_policy,$(EXIT_KIT_OK_ALERT_NAME),alerts/exit-kit-summary.json,$(EXIT_KIT_JOB_NAME))

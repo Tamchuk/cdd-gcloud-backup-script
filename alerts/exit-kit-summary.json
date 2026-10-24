@@ -1,0 +1,26 @@
+{
+  "displayName": "__DISPLAY_NAME__",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Exit kit OK",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"__JOB_NAME__\" AND jsonPayload.event=\"exit_kit_summary\"",
+        "labelExtractors": {
+          "run": "EXTRACT(jsonPayload.run)",
+          "summary": "EXTRACT(jsonPayload.summary)"
+        }
+      }
+    }
+  ],
+  "notificationChannels": ["__CHANNEL__"],
+  "alertStrategy": {
+    "notificationRateLimit": {"period": "300s"},
+    "autoClose": "1800s"
+  },
+  "documentation": {
+    "subject": "CDD exit kit OK (${log.extracted_label.run})",
+    "content": "${log.extracted_label.summary}\n\nThe monthly exit-kit check converted the newest backup into SDF/CSV/files (README: \"Restoring, or moving away from CDD\"), read the output back and compared it with the backup. The output was discarded on purpose. Nothing to do. If this email doesn't arrive in the first days of a month, check that the exit-kit schedule is still enabled.",
+    "mimeType": "text/markdown"
+  }
+}

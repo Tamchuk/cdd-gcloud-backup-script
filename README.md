@@ -9,7 +9,7 @@ daily check that the backup is complete and can be read back.
 - **Exit-kit check** (Cloud Run job `cdd-backup-exit-kit`): the 1st of each month at 08:00. Converts the newest
   backup into standard files (see "Restoring, or moving away from CDD"), checks them, and throws them away: it
   proves the conversion still works on the current data.
-- **Emails**: a summary after every backup, and an alert whenever something fails.
+- **Emails**: a summary after every backup, "exit kit OK" once a month, and an alert whenever something fails.
 
 Nothing needs to be done day to day. Read the emails; act when one says FAILED or WARNING.
 
@@ -38,14 +38,16 @@ exports look like `{"count": N, "objects": [...]}`.
 |---|---|---|
 | **CDD backup OK** | Backup finished. A table with each export's number of records and size, and the change since the previous backup | Nothing |
 | **CDD backup WARNING** | An export failed, has **fewer records** than last time, or couldn't be compared | Read the WARNING lines. Fewer records can be real (records deleted in CDD) or a problem (e.g. the backup user lost access to a project). A smaller size with the same records is shown in the table but isn't a warning |
+| **CDD exit kit OK** | The monthly exit-kit check converted the newest backup and all checks passed. Lists what was written | Nothing |
 | **cdd-backup failed** | The backup job failed | Look at the summary email from the same night and `make logs JOB=backup`. The next scheduled run retries |
 | **cdd-backup-verify failed** | The newest backup failed a check, or no recent backup exists ("age") | `make logs JOB=verify`, look for FAIL lines |
 | **cdd-backup-exit-kit failed** | The monthly conversion into SDF/CSV failed or didn't match the backup. The backup itself is fine | `make logs JOB=exit-kit`; reproduce with `make exit-kit`, fix `exit_kit.py`, `make deploy-exit-kit` |
 | **... trigger failed** | Cloud Scheduler couldn't start a job | Check the schedule in the Cloud Console, or re-run `make schedule` / `make schedule-verify` / `make schedule-exit-kit` |
 | **... alert recovered** | Sent about 10 minutes after each "failed" email | Nothing (it does not mean the problem is fixed) |
 
-**No email at all for a few days is also a problem**: it can mean the schedules or the alerts stopped. Check the
-Cloud Scheduler page now and then.
+**No email at all for a few days is also a problem**: it can mean the schedules or the alerts stopped. The same
+goes for no "exit kit OK" in the first days of a month. The verification sends nothing when it passes, so check
+the Cloud Scheduler page now and then.
 
 ## Getting started on a new computer
 
@@ -107,7 +109,7 @@ make run              # one backup now (~80 min), then check the summary email
 make deploy-verify    # build and deploy the verification job
 make run-verify       # check that backup (~5 min); `make logs JOB=verify` should end with 0 failed
 make deploy-exit-kit  # build and deploy the monthly exit-kit check
-make run-exit-kit     # try it once (~5 min); `make logs JOB=exit-kit` should end with "All checks passed."
+make run-exit-kit     # try it once (~5 min); you should get the "CDD exit kit OK" email
 make schedule         # Mon-Fri 02:00 backups
 make schedule-verify  # Mon-Fri 06:00 verifications
 make schedule-exit-kit  # 1st of each month, 08:00
