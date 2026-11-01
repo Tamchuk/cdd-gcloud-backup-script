@@ -148,6 +148,10 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the three jobs only.
 - **Plate wells count from 0** in CDD (`row`/`col`: a 1536-well plate is rows 0-31, cols 0-47). Row 0, col 0 = A1.
 - Some readout values are `null` (e.g. an IC50 CDD couldn't fit): an empty cell, not "None".
 - Some protocols have no `readout_definitions` key at all: always `.get(..., [])`.
+- Readout definition names repeat within a protocol (protocol 1000000358 has two curve fits, each with `N`,
+  `R squared`, `Hill slope`, ...). `readouts.csv` titles add `(#<definition id>)` to repeated ones; the self-check
+  fails a repeated title. Found 2026-11-01 when the real setup's monthly exit-kit job failed on one sampled row:
+  the sample happened to hit a row where the two "same" columns differed.
 
 ## Unverified / open items
 

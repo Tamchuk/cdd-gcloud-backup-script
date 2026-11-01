@@ -68,6 +68,40 @@ def well_label(row, col):
     return f"{label}{col + 1}"
 
 
+# readouts.csv columns before and after the readout columns
+READOUT_ID_COLUMNS = [
+    "readout_row_id",
+    "type",
+    "molecule_id",
+    "molecule_name",
+    "batch_id",
+    "batch_name",
+    "run_id",
+    "run_date",
+    "plate_id",
+    "plate_name",
+    "well",
+]
+READOUT_EXTRA_COLUMNS = ["outliers", "fit_parameters", "other_readouts"]
+
+
+def readout_columns(protocol):
+    """[(definition id, column title)] in the protocol's order. Titles are "Name [unit]";
+    a title that isn't unique in the protocol (e.g. "R squared" of two curve fits) or
+    that equals a fixed column gets the definition id: "R squared (#123)".
+    """
+    defs = [
+        (
+            d["id"],
+            f"{d['name']} [{d['unit_label']}]" if d.get("unit_label") else d["name"],
+        )
+        for d in protocol.get("readout_definitions") or []
+    ]
+    taken = Counter(title for _, title in defs)
+    taken.update(READOUT_ID_COLUMNS + READOUT_EXTRA_COLUMNS)
+    return [(i, f"{title} (#{i})" if taken[title] > 1 else title) for i, title in defs]
+
+
 class Kit:
     """Reads one backup run (via verify_backup.Source) and writes the exit kit."""
 
@@ -247,7 +281,7 @@ class Kit:
     def write_assays(self):
         protocols = {p["id"]: p for p in self.records("protocols")}
         self.runs = {r["id"]: r for r in self.records("runs")}
-        folders, writers, readout_columns = {}, {}, {}
+        folders, writers, columns = {}, {}, {}
 
         for pid, p in protocols.items():
             folder = f"assays/{pid}-{safe(p.get('name'))}"
@@ -258,15 +292,7 @@ class Kit:
                 folder, [r for r in self.runs.values() if r.get("protocol") == pid]
             )
             # One column per readout definition, in the protocol's order
-            readout_columns[pid] = [
-                (
-                    d["id"],
-                    f"{d['name']} [{d['unit_label']}]"
-                    if d.get("unit_label")
-                    else d["name"],
-                )
-                for d in p.get("readout_definitions") or []
-            ]
+            columns[pid] = readout_columns(p)
             self.counts["protocols"] += 1
 
         unknown_readouts = Counter()
@@ -282,24 +308,12 @@ class Kit:
                     )
                     writers[pid] = csv.writer(f)
                     writers[pid].writerow(
-                        [
-                            "readout_row_id",
-                            "type",
-                            "molecule_id",
-                            "molecule_name",
-                            "batch_id",
-                            "batch_name",
-                            "run_id",
-                            "run_date",
-                            "plate_id",
-                            "plate_name",
-                            "well",
-                        ]
-                        + [label for _, label in readout_columns.get(pid, [])]
-                        + ["outliers", "fit_parameters", "other_readouts"]
+                        READOUT_ID_COLUMNS
+                        + [label for _, label in columns.get(pid, [])]
+                        + READOUT_EXTRA_COLUMNS
                     )
                 readouts = row.get("readouts") or {}
-                known = {str(i) for i, _ in readout_columns.get(pid, [])}
+                known = {str(i) for i, _ in columns.get(pid, [])}
                 other = {k: v for k, v in readouts.items() if k not in known}
                 unknown_readouts.update(other.keys())
                 well = row.get("well") or {}
@@ -321,12 +335,12 @@ class Kit:
                     ]
                     + [
                         self.readout_value(readouts.get(str(i)))
-                        for i, _ in readout_columns.get(pid, [])
+                        for i, _ in columns.get(pid, [])
                     ]
                     + [
                         "; ".join(
                             label
-                            for i, label in readout_columns.get(pid, [])
+                            for i, label in columns.get(pid, [])
                             if (readouts.get(str(i)) or {}).get("outlier")
                         ),
                         json.dumps(row["batch_run_fit_parameters"])
@@ -525,12 +539,16 @@ def check_output(kit):
 
     # readouts.csv: rows per protocol equal; sampled values and links identical
     labels, folders = {}, {}
+    fixed = set(READOUT_ID_COLUMNS + READOUT_EXTRA_COLUMNS)
     for p in kit.records("protocols"):
+        plain = {}
+        for d in p.get("readout_definitions") or []:
+            unit = d.get("unit_label")
+            plain[str(d["id"])] = f"{d['name']} [{unit}]" if unit else d["name"]
+        seen = Counter(plain.values())
         labels[p["id"]] = {
-            str(d["id"]): f"{d['name']} [{d['unit_label']}]"
-            if d.get("unit_label")
-            else d["name"]
-            for d in p.get("readout_definitions") or []
+            i: f"{t} (#{i})" if seen[t] > 1 or t in fixed else t
+            for i, t in plain.items()
         }
     for entry in os.listdir(kit.path("assays")):
         folders[int(entry.split("-")[0])] = entry
@@ -539,13 +557,17 @@ def check_output(kit):
         per_protocol[r.get("protocol")] += 1
         if rng.random() < SAMPLE_RATE:
             expected[str(r["id"])] = r
-    found, bad, compared = Counter(), [], 0
+    found, bad, compared, repeated = Counter(), [], 0, []
     for pid, entry in folders.items():
         path = kit.path("assays", entry, "readouts.csv")
         if not os.path.exists(path):
             continue
         with open(path, newline="") as f:
-            for row in csv.DictReader(f):
+            reader = csv.DictReader(f)
+            # A repeated title makes a column unreadable by name (DictReader keeps the last)
+            if len(set(reader.fieldnames or [])) != len(reader.fieldnames or []):
+                repeated.append(pid)
+            for row in reader:
                 found[pid] += 1
                 r = expected.get(row["readout_row_id"])
                 if r is None:
@@ -572,6 +594,11 @@ def check_output(kit):
         f"readouts.csv: {sum(found.values()):,} rows in {len(found)} protocols, backup has "
         f"{sum(per_protocol.values()):,}"
         + (f"; counts differ for protocols {differ[:5]}" if differ else ""),
+    )
+    check(
+        not repeated,
+        "readouts.csv: every column title unique"
+        + (f"; repeated in protocols {repeated[:5]}" if repeated else ""),
     )
     check(not bad, sampled("readouts.csv", compared, "values and links", bad, "rows"))
 
@@ -650,7 +677,9 @@ assays/<protocol id>-<protocol name>/
   protocol.json  the protocol as CDD stored it: readout definitions (name, unit, data
                  type), calculations (e.g. dose-response fits), protocol fields.
   readouts.csv   one row per readout row; one column per readout definition, titled
-                 "Name [unit]". Values with a modifier read like ">10". "outliers" lists
+                 "Name [unit]". Where two definitions share a title (e.g. "R squared" of
+                 two curve fits), both get the definition id from protocol.json:
+                 "R squared (#123)". Values with a modifier read like ">10". "outliers" lists
                  readouts flagged as outliers in that row; "fit_parameters" holds curve-fit
                  parameters as JSON. "type" tells detail rows from aggregate rows.
   runs.csv       one row per run: date, person, conditions, run fields, source files.
