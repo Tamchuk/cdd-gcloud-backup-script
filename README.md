@@ -36,8 +36,8 @@ exports look like `{"count": N, "objects": [...]}`.
 
 | Email | Meaning | What to do |
 |---|---|---|
-| **CDD backup OK** | Backup finished. A table with each export's number of records and size, and the change since the previous backup | Nothing |
-| **CDD backup WARNING** | An export failed, has **fewer records** than last time, or couldn't be compared | Read the WARNING lines. Fewer records can be real (records deleted in CDD) or a problem (e.g. the backup user lost access to a project). A smaller size with the same records is shown in the table but isn't a warning |
+| **CDD backup OK** | Backup finished. CDD API minutes used this month out of the 20,000 quota, and a table with each export's number of records and size, and the change since the previous backup | Nothing |
+| **CDD backup WARNING** | An export failed, has **fewer records** than last time, couldn't be compared, or this month's CDD API usage passed 80% of the quota (each backup uses ~75 min; reduce the schedule or ask CDD) | Read the WARNING lines. Fewer records can be real (records deleted in CDD) or a problem (e.g. the backup user lost access to a project). A smaller size with the same records is shown in the table but isn't a warning |
 | **CDD exit kit OK** | The monthly exit-kit check converted the newest backup and all checks passed. Lists what was written | Nothing |
 | **cdd-backup failed** | The backup job failed | Look at the summary email from the same night and `make logs JOB=backup`. The next scheduled run retries |
 | **cdd-backup-verify failed** | The newest backup failed a check, or no recent backup exists ("age") | `make logs JOB=verify`, look for FAIL lines |

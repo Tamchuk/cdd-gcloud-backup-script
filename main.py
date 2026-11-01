@@ -60,6 +60,10 @@ BASE_URL = os.environ.get(
 POLL_INTERVAL_SECONDS = 10  # CDD suggests polling every 5-10 seconds
 MAX_POLL_ERRORS = 5  # consecutive failed status checks tolerated before giving up
 HEARTBEAT_SECONDS = 5 * 60  # log a progress line at most this often while waiting
+API_QUOTA_MINUTES = (
+    20_000  # CDD's monthly API quota (from the CDD plan; not in the API docs)
+)
+API_QUOTA_WARN_SHARE = 0.8  # the summary turns WARNING from this share of the quota
 EXPORT_TIMEOUT_SECONDS = 2 * 60 * 60  # give up on a single export after 2 hours
 CHUNK_SIZE = 8 * 1024 * 1024
 FAILED_STATUSES = {"failed", "error", "canceled", "cancelled"}
@@ -641,7 +645,25 @@ def _count_or_none(cfg, object_name):
         return None
 
 
-def log_summary(cfg, run_id, results, failures):
+def api_minutes_this_month(session, cfg):
+    """CDD's API usage of this token's key since the 1st of the month (UTC), in minutes.
+
+    From GET /api_executions ({"<key name>": {"after": ..., "seconds": N}}). It counts
+    the time CDD spends on our exports. None if unavailable: only for the report.
+    """
+    start = datetime.now(UTC).strftime("%Y-%m-01T00:00:00+00:00")
+    try:
+        resp = session.get(
+            f"{cfg.vault_url}/api_executions", params={"after": start}, timeout=30
+        )
+        resp.raise_for_status()
+        return sum(v["seconds"] for v in resp.json().values()) / 60
+    except requests.RequestException, ValueError, KeyError, TypeError, AttributeError:
+        log.warning("Could not read the API usage", exc_info=True)
+        return None
+
+
+def log_summary(cfg, run_id, results, failures, api_minutes=None):
     """Log one structured summary line; a Cloud Monitoring alert emails it.
 
     The summary is a markdown table (the alert email renders it): per export the
@@ -649,6 +671,8 @@ def log_summary(cfg, run_id, results, failures):
     with the previous complete backup. WARNING on fewer records or a failure.
 
     results: {name: (uncompressed bytes, stored bytes)} for successful exports.
+    api_minutes: CDD's API usage this month (api_minutes_this_month), None if unknown;
+    WARNING from API_QUOTA_WARN_SHARE of API_QUOTA_MINUTES.
     """
     warnings = []
     try:
@@ -704,6 +728,13 @@ def log_summary(cfg, run_id, results, failures):
             )
         )
 
+    if api_minutes is None:
+        usage = "unknown"
+    else:
+        usage = f"{api_minutes:,.0f} of {API_QUOTA_MINUTES:,} min ({api_minutes / API_QUOTA_MINUTES:.0%})"
+        if api_minutes >= API_QUOTA_WARN_SHARE * API_QUOTA_MINUTES:
+            warnings.append(f"CDD API usage this month: {usage}, near the quota")
+
     status = "WARNING" if warnings else "OK"
     header = f"Vault {cfg.vault_id}, run {run_id}: {status}"
     if compared_with:
@@ -714,6 +745,7 @@ def log_summary(cfg, run_id, results, failures):
         + "\n\n"
         + "".join(f"- WARNING: {w}\n" for w in warnings)
         + ("\n" if warnings else "")
+        + f"CDD API usage this month (this key, UTC): {usage}\n\n"
         + "| Export | Records | Change | Size | Stored | Size change |\n"
         + "|:--|--:|--:|--:|--:|--:|\n"
         + "\n".join("| " + " | ".join(row) + " |" for row in rows)
@@ -752,7 +784,7 @@ def main():
             log.exception("[%s] FAILED", name)
             failures.append(name)  # keep going so one failure doesn't skip the rest
 
-    log_summary(cfg, run_id, results, failures)
+    log_summary(cfg, run_id, results, failures, api_minutes_this_month(session, cfg))
 
     if failures:
         log.error("Backup finished with failures: %s", ", ".join(failures))

@@ -63,7 +63,11 @@ Failures email the owner via Cloud Monitoring alerts.
   data is read whole), for this run and the previous one. Status is `WARNING` if an export has **fewer records**, failed,
   or previous sizes couldn't be read; a smaller size with the same records is only shown. Exports without a count
   (`fields`, a single object; the ELN zip) fall back to warning on a smaller size. The log-based alert
-  `alerts/backup-summary.json` emails it. A warning doesn't change the exit code; a failed run sends both the failed alert
+  `alerts/backup-summary.json` emails it. It also shows CDD's API usage this month, from
+  `GET /api_executions?after=<1st of the month, UTC>` (seconds for the token's key only; it counts the time CDD
+  spends on our exports: ~35,000 s in the real setup's first ~8 runs, i.e. ~75 min per backup), against
+  `API_QUOTA_MINUTES` (20,000/month, from the CDD plan); WARNING from 80%. Unreadable usage shows "unknown"
+  without a warning. A warning doesn't change the exit code; a failed run sends both the failed alert
   and the summary.
 - **Poll tolerance:** up to 5 consecutive failed status checks are tolerated; unexpected statuses show up in the logs.
 - **Deploy with `--max-retries 0`** so a failed run doesn't immediately start a second export behind the first. The next scheduled run is the retry.
@@ -152,6 +156,10 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the three jobs only.
   `R squared`, `Hill slope`, ...). `readouts.csv` titles add `(#<definition id>)` to repeated ones; the self-check
   fails a repeated title. Found 2026-11-01 when the real setup's monthly exit-kit job failed on one sampled row:
   the sample happened to hit a row where the two "same" columns differed.
+- Readout values can carry a `note` (2026-10-15 run: 755,557, mostly "(n=1)", also "± ... (n=2)", "×/÷ ..." and
+  curve-fit messages such as "could not ..."). `readouts.csv` has a `<title> note` column for each definition with any
+  note (86 columns); found with an extra pass over readout_rows. `note` is deliberately not in `EXPECTED_FIELDS`
+  (optional; a vault may have none).
 
 ## Unverified / open items
 

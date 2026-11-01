@@ -295,7 +295,15 @@ class Kit:
             columns[pid] = readout_columns(p)
             self.counts["protocols"] += 1
 
-        unknown_readouts = Counter()
+        # A "<title> note" column only for readouts that have a note somewhere (e.g.
+        # "± 7.6 (n=2)" on averaged values): a first pass over the readout rows finds them
+        noted = set()  # (protocol id, definition id)
+        for row in self.records("readout_rows"):
+            for i, readout in (row.get("readouts") or {}).items():
+                if (readout or {}).get("note"):
+                    noted.add((row.get("protocol"), i))
+
+        unknown_readouts, layout = Counter(), {}
         # One readouts.csv per protocol, all open at once. The stack closes every
         # one of them, also when the export fails halfway
         with ExitStack() as stack:
@@ -307,11 +315,15 @@ class Kit:
                         open(self.path(folder, "readouts.csv"), "w", newline="")
                     )
                     writers[pid] = csv.writer(f)
-                    writers[pid].writerow(
-                        READOUT_ID_COLUMNS
-                        + [label for _, label in columns.get(pid, [])]
-                        + READOUT_EXTRA_COLUMNS
-                    )
+                    # (definition id, title, with a note column)
+                    layout[pid] = [
+                        (str(i), label, (pid, str(i)) in noted)
+                        for i, label in columns.get(pid, [])
+                    ]
+                    header = list(READOUT_ID_COLUMNS)
+                    for _, label, with_note in layout[pid]:
+                        header += [label, f"{label} note"] if with_note else [label]
+                    writers[pid].writerow(header + READOUT_EXTRA_COLUMNS)
                 readouts = row.get("readouts") or {}
                 known = {str(i) for i, _ in columns.get(pid, [])}
                 other = {k: v for k, v in readouts.items() if k not in known}
@@ -319,6 +331,13 @@ class Kit:
                 well = row.get("well") or {}
                 run = self.runs.get(row.get("run")) or {}
                 batch_name = self.batches.get(row.get("batch"), (None,))[0]
+                cells = []
+                for i, _, with_note in layout[pid]:
+                    readout = readouts.get(i) or {}
+                    cells.append(self.readout_value(readout))
+                    if with_note:
+                        cells.append(readout.get("note") or "")
+                        self.counts["readout notes"] += bool(readout.get("note"))
                 writers[pid].writerow(
                     [
                         row["id"],
@@ -333,10 +352,7 @@ class Kit:
                         self.plates.get(well.get("plate")),
                         well_label(well.get("row"), well.get("col")),
                     ]
-                    + [
-                        self.readout_value(readouts.get(str(i)))
-                        for i, _ in columns.get(pid, [])
-                    ]
+                    + cells
                     + [
                         "; ".join(
                             label
@@ -585,6 +601,11 @@ def check_output(kit):
                         wanted[labels[pid][def_id]] = (
                             "" if value is None else modifier + expected_cell(value)
                         )
+                        # A note needs its column; where the column exists, an
+                        # absent note is an empty cell
+                        note_column = f"{labels[pid][def_id]} note"
+                        if readout.get("note") or note_column in row:
+                            wanted[note_column] = expected_cell(readout.get("note"))
                 compared += len(wanted)
                 if any(row.get(k) != v for k, v in wanted.items()):
                     bad.append(r["id"])
@@ -600,7 +621,10 @@ def check_output(kit):
         "readouts.csv: every column title unique"
         + (f"; repeated in protocols {repeated[:5]}" if repeated else ""),
     )
-    check(not bad, sampled("readouts.csv", compared, "values and links", bad, "rows"))
+    check(
+        not bad,
+        sampled("readouts.csv", compared, "values, notes and links", bad, "rows"),
+    )
 
     # plates.csv: every well, a label for each, no label twice on a plate
     total = sum(len(p.get("wells") or []) for p in kit.records("plates"))
@@ -679,7 +703,9 @@ assays/<protocol id>-<protocol name>/
   readouts.csv   one row per readout row; one column per readout definition, titled
                  "Name [unit]". Where two definitions share a title (e.g. "R squared" of
                  two curve fits), both get the definition id from protocol.json:
-                 "R squared (#123)". Values with a modifier read like ">10". "outliers" lists
+                 "R squared (#123)". Values with a modifier read like ">10". A readout
+                 that has notes in CDD (e.g. "± 7.6 (n=2)" on an averaged value) gets a
+                 "<title> note" column right after it. "outliers" lists
                  readouts flagged as outliers in that row; "fit_parameters" holds curve-fit
                  parameters as JSON. "type" tells detail rows from aggregate rows.
   runs.csv       one row per run: date, person, conditions, run fields, source files.

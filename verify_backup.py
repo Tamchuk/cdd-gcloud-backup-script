@@ -86,7 +86,8 @@ MAX_EXAMPLES = 5
 # empty in some records, so a single missing value is fine).
 # "a.b": field b inside object a, or inside the items of list a.
 # "a.*.b": field b inside the values of a, an object keyed by ids (readouts).
-# Keep in sync with what exit_kit.py reads.
+# Keep in sync with what exit_kit.py reads, except optional fields a vault may lack
+# entirely: readout "note" (exit_kit.py writes note columns only where notes exist).
 EXPECTED_FIELDS = {
     "molecules": ["id", "name", "molfile", "smiles", "inchi_key", "synonyms", "projects",
                   "collections", "collections.id", "source_files.id", "source_files.name"],
