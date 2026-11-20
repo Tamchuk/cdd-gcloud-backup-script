@@ -18,7 +18,7 @@
   "notificationChannels": ["__CHANNEL__"],
   "alertStrategy": {"autoClose": "1800s"},
   "documentation": {
-    "content": "The monthly exit-kit check __JOB_NAME__ failed: converting the newest backup into standard files (SDF/CSV) did not work, or its self-check found differences. The backup itself is not affected, but the exit kit (README: \"Restoring, or moving away from CDD\") may not work on the current data. See `make logs JOB=exit-kit` (FAIL lines or a traceback), reproduce with `make exit-kit`, fix exit_kit.py, then `make deploy-exit-kit`.",
+    "content": "The monthly exit-kit check __JOB_NAME__ failed: converting the newest backup into standard files (SDF/CSV) did not work, its self-check found differences, or keeping the checked kit under `exit-kits/` in the bucket failed. The daily backup itself is not affected, but this month's long-term copy is missing, and the exit kit (README: \"Restoring, or moving away from CDD\") may not work on the current data. See `make logs JOB=exit-kit` (FAIL lines, \"incomplete archive\", or a traceback). A conversion problem: reproduce with `make exit-kit`, fix exit_kit.py, then `make deploy-exit-kit`. An archiving problem: an incomplete `exit-kits/<month>/<run>/` folder (no `manifest.json.done`) can't be completed or deleted by the job; the next backup run is archived into a new folder, or rerun with `make run-exit-kit` once a newer backup exists.",
     "mimeType": "text/markdown"
   }
 }

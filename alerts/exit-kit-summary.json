@@ -20,7 +20,7 @@
   },
   "documentation": {
     "subject": "CDD exit kit OK (${log.extracted_label.run})",
-    "content": "${log.extracted_label.summary}\n\nThe monthly exit-kit check converted the newest backup into SDF/CSV/files (README: \"Restoring, or moving away from CDD\"), read the output back and compared it with the backup. The output was discarded on purpose. Nothing to do. If this email doesn't arrive in the first days of a month, check that the exit-kit schedule is still enabled.",
+    "content": "${log.extracted_label.summary}\n\nThe monthly exit-kit check converted the newest backup into SDF/CSV/files (README: \"Restoring, or moving away from CDD\"), read the output back and compared it with the backup. The checked kit is kept with its source backup under `exit-kits/<month>/<run>/` in the bucket for 13 months (see the line above the table). Nothing to do. If this email doesn't arrive in the first days of a month, check that the exit-kit schedule is still enabled.",
     "mimeType": "text/markdown"
   }
 }

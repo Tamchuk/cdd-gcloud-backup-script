@@ -42,7 +42,7 @@ exports look like `{"count": N, "objects": [...]}`.
 | **CDD exit kit OK** | The monthly exit-kit check converted the newest backup and all checks passed, and where it was archived (`exit-kits/<month>/<run>/`). Lists what was written | Nothing |
 | **cdd-backup failed** | The backup job failed | Look at the summary email from the same night and `make logs JOB=backup`. The next scheduled run retries |
 | **cdd-backup-verify failed** | The newest backup failed a check, or no recent backup exists ("age") | `make logs JOB=verify`, look for FAIL lines |
-| **cdd-backup-exit-kit failed** | The monthly conversion into SDF/CSV failed or didn't match the backup. The backup itself is fine | `make logs JOB=exit-kit`; reproduce with `make exit-kit`, fix `exit_kit.py`, `make deploy-exit-kit` |
+| **cdd-backup-exit-kit failed** | The monthly conversion into SDF/CSV failed or didn't match the backup, or keeping it under `exit-kits/` failed. The daily backup itself is fine, but this month's long-term copy is missing | `make logs JOB=exit-kit`. Conversion: reproduce with `make exit-kit`, fix `exit_kit.py`, `make deploy-exit-kit`. "Incomplete archive": that folder can't be fixed by the job; `make run-exit-kit` again once a newer backup exists (it archives into a new folder) |
 | **... trigger failed** | Cloud Scheduler couldn't start a job | Check the schedule in the Cloud Console, or re-run `make schedule` / `make schedule-verify` / `make schedule-exit-kit` |
 | **... alert recovered** | Sent about 10 minutes after each "failed" email | Nothing (it does not mean the problem is fixed) |
 
@@ -110,7 +110,8 @@ make run              # one backup now (~80 min), then check the summary email
 make deploy-verify    # build and deploy the verification job
 make run-verify       # check that backup (~5 min); `make logs JOB=verify` should end with 0 failed
 make deploy-exit-kit  # build and deploy the monthly exit-kit check
-make run-exit-kit     # try it once (~5 min); you should get the "CDD exit kit OK" email
+make run-exit-kit     # try it once (~10 min); you should get the "CDD exit kit OK" email,
+                      # and gs://<bucket>/exit-kits/ gets its first archive
 make schedule         # Mon-Fri 02:00 backups
 make schedule-verify  # Mon-Fri 06:00 verifications
 make schedule-exit-kit  # 1st of each month, 08:00

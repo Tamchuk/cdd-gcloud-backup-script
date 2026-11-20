@@ -191,8 +191,9 @@ Plus `cdd-backup-scheduler-sa` with `roles/run.invoker` on the three jobs only.
   An unknown export name now stops the run at startup (failed alert, no summary); to test a failed export with a summary,
   use an export the token can't read, e.g. `EXPORTS=users` without admin rights.
 - Not yet decided/done: ELN and users (need a Vault Administrator token; add `eln,users` to `EXPORTS`); multiple vaults
-  (`CDD_VAULT_IDS`) or a warning for unlisted vaults; a restore drill into a CDD test vault (yearly); a lifecycle rule
-  deleting old runs under `backups/` (a retention policy is already set on the bucket); Data Access audit logs;
+  (`CDD_VAULT_IDS`) or a warning for unlisted vaults; a restore drill into a CDD test vault (yearly); on the real
+  bucket, narrowing the lifecycle rule to `backups/` 90 days + `exit-kits/` 400 days (by its owner, after the first
+  archive exists; README has the commands); Data Access audit logs;
   disabling old secret versions after token rotation; RDKit structure checks in the verification.
 - The backup user sees only **1 project** (`projects` export). Confirm with an admin that the vault has no other
   projects, and add the backup user to every new project, otherwise that data is silently missing.

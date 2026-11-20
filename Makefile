@@ -34,7 +34,7 @@ VERIFY_JOB_NAME ?= $(JOB_NAME)-verify
 MAX_AGE_DAYS    ?= 2# fail if the newest complete backup is older (Mon after a failed Mon backup: Fri's is ~3 days)
 VERIFY_MEMORY   ?= 2Gi# record ids kept for the link checks (grows with the vault)
 # The monthly exit-kit check (exit_kit.py): converts the newest backup into /tmp, checks
-# it, and throws it away. /tmp is in memory on Cloud Run and the kit is over 2 GB
+# it, and keeps it under exit-kits/ in the bucket. /tmp is in memory on Cloud Run and the kit is over 2 GB
 EXIT_KIT_JOB_NAME ?= $(JOB_NAME)-exit-kit
 EXIT_KIT_MEMORY   ?= 8Gi# Cloud Run needs at least 2 CPUs above 4Gi
 
@@ -193,7 +193,7 @@ run: check-config require-REGION ## Execute the job once and wait for it to fini
 run-verify: check-config require-REGION ## Execute the verification job once and wait
 	$(GCLOUD) run jobs execute $(VERIFY_JOB_NAME) --region $(REGION) --wait
 
-run-exit-kit: check-config require-REGION ## Execute the exit-kit check once and wait (~5 min)
+run-exit-kit: check-config require-REGION ## Execute the exit-kit check once and wait (~10 min; archives under exit-kits/)
 	$(GCLOUD) run jobs execute $(EXIT_KIT_JOB_NAME) --region $(REGION) --wait
 
 executions: check-config require-REGION ## List recent executions of the job
