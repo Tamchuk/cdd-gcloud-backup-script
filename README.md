@@ -7,8 +7,9 @@ daily check that the backup is complete and can be read back.
   backed up the following night. Takes about 80 minutes.
 - **Verification** (Cloud Run job `cdd-backup-verify`): Mon-Fri at 06:00. Reads the newest backup and checks it.
 - **Exit-kit check** (Cloud Run job `cdd-backup-exit-kit`): the 1st of each month at 08:00. Converts the newest
-  backup into standard files (see "Restoring, or moving away from CDD"), checks them, and throws them away: it
-  proves the conversion still works on the current data.
+  backup into standard files (see "Restoring, or moving away from CDD") and checks them, which proves the
+  conversion still works on the current data. It then keeps them, with the backup they came from, under
+  `exit-kits/` in the bucket for 13 months: if the backups ever stop, a ready-to-use copy outlives the 90 days.
 - **Emails**: a summary after every backup, "exit kit OK" once a month, and an alert whenever something fails.
 
 Nothing needs to be done day to day. Read the emails; act when one says FAILED or WARNING.
@@ -38,7 +39,7 @@ exports look like `{"count": N, "objects": [...]}`.
 |---|---|---|
 | **CDD backup OK** | Backup finished. CDD API minutes used this month out of the 20,000 quota, and a table with each export's number of records and size, and the change since the previous backup | Nothing |
 | **CDD backup WARNING** | An export failed, has **fewer records** than last time, couldn't be compared, or this month's CDD API usage passed 80% of the quota (each backup uses ~75 min; reduce the schedule or ask CDD) | Read the WARNING lines. Fewer records can be real (records deleted in CDD) or a problem (e.g. the backup user lost access to a project). A smaller size with the same records is shown in the table but isn't a warning |
-| **CDD exit kit OK** | The monthly exit-kit check converted the newest backup and all checks passed. Lists what was written | Nothing |
+| **CDD exit kit OK** | The monthly exit-kit check converted the newest backup and all checks passed, and where it was archived (`exit-kits/<month>/<run>/`). Lists what was written | Nothing |
 | **cdd-backup failed** | The backup job failed | Look at the summary email from the same night and `make logs JOB=backup`. The next scheduled run retries |
 | **cdd-backup-verify failed** | The newest backup failed a check, or no recent backup exists ("age") | `make logs JOB=verify`, look for FAIL lines |
 | **cdd-backup-exit-kit failed** | The monthly conversion into SDF/CSV failed or didn't match the backup. The backup itself is fine | `make logs JOB=exit-kit`; reproduce with `make exit-kit`, fix `exit_kit.py`, `make deploy-exit-kit` |
@@ -122,8 +123,18 @@ Don't start a second one while it runs.
 Then, in the Cloud Console (bucket > Protection, and bucket > Lifecycle):
 - a **retention policy**: nothing in the bucket can be deleted or overwritten before it is N days old, not even by
   an owner. **Don't lock it** until everything works: a locked policy can never be shortened or removed.
-- a **lifecycle rule** deleting objects after the number of days of backups you want to keep (longer than the
-  retention period; it can't delete anything younger than that anyway).
+- **lifecycle rules**, one per folder, each longer than the retention period (it can't delete anything younger
+  than that anyway): `backups/` after the number of days of backups you want to keep (e.g. 90), and
+  `exit-kits/` after about 13 months (400 days). Use the "matches prefix" condition: **a rule without a prefix
+  would delete the long-term exit kits after the same 90 days.** From the command line:
+
+  ```bash
+  gcloud storage buckets describe gs://<bucket> --format="yaml(lifecycle_config)"   # current rules
+  gcloud storage buckets update gs://<bucket> --lifecycle-file=lifecycle.json
+  ```
+  with `lifecycle.json`:
+  `{"rule": [{"action": {"type": "Delete"}, "condition": {"age": 90, "matchesPrefix": ["backups/"]}},
+  {"action": {"type": "Delete"}, "condition": {"age": 400, "matchesPrefix": ["exit-kits/"]}}]}`
 
 ## Routine tasks
 
@@ -165,9 +176,22 @@ A `README.txt` inside explains every file. A full vault takes about 2 minutes pl
 (record counts for every file, a few thousand sampled values and links, plate labels, file sizes). It ends
 with "All checks passed." or exits with an error listing what differs: then don't rely on that output.
 
-The monthly **exit-kit check** job runs exactly this in Google Cloud on the newest backup and discards the
-output, so you know before an emergency that the conversion still works on your current data. Its output isn't
-kept on purpose: the JSON backup is the master copy, and in an emergency you'd convert the newest backup anyway.
+The monthly **exit-kit check** job runs exactly this in Google Cloud on the newest backup, so you know before an
+emergency that the conversion still works on your current data. When all checks pass, it keeps the result in the
+bucket under `exit-kits/<month>/<run>/`, kept 13 months (the daily backups only 90 days):
+
+- the exit kit itself, ready to load into another system without running any code (`.csv` and `.sdf` files are
+  gzip-compressed: `gunzip` them, or most tools open `.gz` directly);
+- `files/`: the attached and source files the kit's tables point to;
+- `backup/`: the CDD JSON the kit was made from, the complete master copy (the kit holds only the fields it
+  converts). To make a new kit from it (e.g. with a fixed exit_kit.py): download `backup/` and `files/` into
+  one local folder `backups/<run>/` (with `files/` inside it), then
+  `uv run python exit_kit.py --local . --vault <id> --run <run>`;
+- `manifest.json`: what was written, and each file's size and SHA-256. An archive is complete only if
+  `manifest.json.done` exists.
+
+Each backup run is archived once: if the backups stop, later monthly runs don't add copies of the same one.
+To download one: `gcloud storage cp -r gs://<bucket>/exit-kits/<month>/<run> .`
 
 `make exit-kit CHECK_STRUCTURES=1` also reads every structure with RDKit, an independent chemistry toolkit
 (downloaded on first use; a few more minutes), and lists molecules whose InChIKey differs from CDD's in
@@ -187,7 +211,8 @@ the inputs and the fit results are kept).
 
 ## Costs
 
-About $1-2 per month in total for one vault (mostly storage: ~410 MB per run, kept for the lifecycle period),
+About $1-2 per month in total for one vault (mostly storage: ~410 MB per run, kept for the lifecycle period,
+plus ~0.5 GB per monthly exit-kit archive, ~7 GB for 13 of them),
 with Cloud Run time inside the free allowance. Every deploy stores a new container image (~40-200 MB) in the
 `cloud-run-source-deploy` repository; `make setup` gives it a cleanup policy (`registry-cleanup.json`: keep the
 newest 5 per job, delete older ones after 30 days). That repository is shared with anything else in the project

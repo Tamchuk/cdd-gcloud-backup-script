@@ -174,14 +174,15 @@ deploy-verify: check-config require-REGION require-BUCKET_NAME require-CDD_VAULT
 
 deploy-exit-kit: check-config require-REGION require-BUCKET_NAME require-CDD_VAULT_ID ## Build and deploy the monthly exit-kit check (no schedule)
 	@test -f Dockerfile || { echo "No Dockerfile here: run make from the project folder" >&2; exit 1; }
-	@# Same image and service account, but no CDD token: it only reads the bucket.
+	@# Same image and service account, but no CDD token: it only reads the bucket and,
+	@# with --archive, adds the checked kit and its source run under exit-kits/ (create only).
 	@# Output goes to /tmp (the app folder isn't writable) and disappears with the container.
 	$(GCLOUD) run jobs deploy $(EXIT_KIT_JOB_NAME) \
 	  --source . \
 	  --region $(REGION) \
 	  --service-account $(SA) \
 	  --set-env-vars "CDD_VAULT_ID=$(CDD_VAULT_ID),BUCKET_NAME=$(BUCKET_NAME)" \
-	  --command python --args "exit_kit.py,--out,/tmp/exit-kit" \
+	  --command python --args "exit_kit.py,--out,/tmp/exit-kit,--archive" \
 	  --task-timeout 1h \
 	  --memory $(EXIT_KIT_MEMORY) --cpu 2 \
 	  --max-retries 0

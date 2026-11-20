@@ -19,12 +19,17 @@ Without --run, the newest complete run is used (as in verify_backup.py). Output
   files/                the original source/attached files, as "<file id>-<name>"
   reference/            projects, fields, collections, searches, ... as readable JSON
 
+With --archive (the monthly Cloud Run job; needs --bucket), a kit that passed all
+checks is kept with its source run in the bucket under exit-kits/<YYYY-MM>/<run>/,
+which the lifecycle rules keep longer than backups/ (see archive()).
+
 Needs only the Python standard library plus ijson (no chemistry toolkit).
 """
 
 import argparse
 import csv
 import gzip
+import hashlib
 import json
 import os
 import random
@@ -34,6 +39,7 @@ import subprocess
 import sys
 from collections import Counter
 from contextlib import ExitStack
+from datetime import UTC, datetime
 
 import ijson
 
@@ -724,7 +730,119 @@ reference/
 
 Ids are CDD's ids. A new system will assign its own: keep the CDD ids in a field
 if you need to trace records back to this export.
+
+In the bucket's archive (exit-kits/<month>/<run>/), the .csv and .sdf files are
+gzip-compressed (.gz), manifest.json lists every file with its SHA-256, and backup/
+holds the CDD JSON this kit was made from.
 """
+
+
+# --- Archive: keep a checked kit and its source run (--archive, the Cloud Run job) --
+
+ARCHIVE_PREFIX = (
+    "exit-kits/"  # kept longer than backups/ by the bucket's lifecycle rules
+)
+GZIP_SUFFIXES = (".csv", ".sdf")  # the big text files, gzipped in the archive
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def archive(bucket, run_id, vault, sizes, kit):
+    """Keep the checked kit and its source backup run in exit-kits/<YYYY-MM>/<run>/.
+
+    Layout: the kit (its .csv/.sdf gzipped), files/ (the run's attached/source files,
+    which the kit's tables point to), backup/ (the run's JSON exports and markers),
+    manifest.json, and last manifest.json.done. files/ and backup/ are copied inside
+    the bucket, not downloaded. Nothing is ever overwritten (if_generation_match=0).
+    Returns (destination, archived now): a run already archived in any month is skipped.
+    """
+    done = f"{ARCHIVE_PREFIX}*/{run_id}/manifest.json.done"
+    for blob in bucket.list_blobs(prefix=ARCHIVE_PREFIX, match_glob=done):
+        return blob.name.removesuffix("manifest.json.done"), False
+    dest = f"{ARCHIVE_PREFIX}{datetime.now(UTC):%Y-%m}/{run_id}/"
+    if next(iter(bucket.list_blobs(prefix=dest, max_results=1)), None):
+        # This job can't delete it (no delete permission), and won't write over it
+        sys.exit(
+            f"gs://{bucket.name}/{dest} holds an incomplete archive (no manifest.json.done):"
+            " not archiving again. Next month's run archives into a new folder"
+        )
+
+    print(f"\nArchiving to gs://{bucket.name}/{dest}", flush=True)
+    source_prefix = f"backups/{run_id}/"
+    copied = 0
+    for path in sorted(p for p in sizes if p.startswith(source_prefix)):
+        rel = path.removeprefix(source_prefix)
+        target = bucket.blob(
+            dest + (rel if rel.startswith("files/") else "backup/" + rel)
+        )
+        token = None
+        while True:  # big objects can take several rewrite calls
+            token, _, _ = target.rewrite(
+                bucket.blob(path), token=token, if_generation_match=0
+            )
+            if not token:
+                break
+        copied += 1
+    print(
+        f"  copied {copied:,} objects of the backup run (files/, backup/)", flush=True
+    )
+
+    entries = []
+    for folder, subfolders, names in os.walk(kit.out):
+        if folder == kit.out:
+            subfolders[:] = [s for s in subfolders if s != "files"]  # copied above
+        for name in sorted(names):
+            local = os.path.join(folder, name)
+            rel = os.path.relpath(local, kit.out).replace(os.sep, "/")
+            size = os.path.getsize(local)
+            if name.endswith(GZIP_SUFFIXES):
+                with open(local, "rb") as src, gzip.open(local + ".gz", "wb") as gz:
+                    shutil.copyfileobj(src, gz)
+                os.remove(local)  # /tmp is memory in Cloud Run
+                local, rel = local + ".gz", rel + ".gz"
+            bucket.blob(dest + rel).upload_from_filename(
+                local, checksum="crc32c", if_generation_match=0
+            )
+            entries.append(
+                {
+                    "path": rel,
+                    "bytes": size,  # uncompressed
+                    "stored_bytes": os.path.getsize(local),
+                    "sha256": sha256(local),  # of the stored file
+                }
+            )
+    print(f"  uploaded {len(entries):,} kit files", flush=True)
+
+    manifest = {
+        "snapshot": run_id,
+        "vault": vault,
+        "archived_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "written": dict(kit.counts),
+        "kit_files": entries,
+        "objects_copied_from_backup": copied,
+        "layout": (
+            "The exit kit (see README.txt; .csv and .sdf gzipped). files/: the attached and"
+            " source files the kit's tables point to. backup/: the CDD JSON exports of this"
+            " snapshot with their .done markers, the master copy (its files list names"
+            f" objects under {source_prefix}files/, which are files/ here)."
+        ),
+    }
+    bucket.blob(dest + "manifest.json").upload_from_string(
+        json.dumps(manifest, indent=2),
+        content_type="application/json",
+        if_generation_match=0,
+    )
+    # Last: the archive counts as complete only with this marker (as in backups/)
+    bucket.blob(dest + "manifest.json.done").upload_from_string(
+        str(copied + len(entries) + 1), if_generation_match=0
+    )
+    return dest, True
 
 
 def main():
@@ -740,9 +858,17 @@ def main():
         action="store_true",
         help="also read every structure with RDKit (via uv; a few minutes)",
     )
+    parser.add_argument(
+        "--archive",
+        action="store_true",
+        help=f"after all checks pass, keep the kit and its source run in {ARCHIVE_PREFIX}"
+        " in the bucket (the monthly Cloud Run job)",
+    )
     args = parser.parse_args()
     if not (args.bucket or args.local) or not args.vault:
         parser.error("set --bucket (or --local) and --vault, or their env variables")
+    if args.archive and args.local:
+        parser.error("--archive needs --bucket, not --local")
 
     source = Source(args.local, args.bucket)
     sizes = source.list_sizes()
@@ -801,11 +927,16 @@ def main():
             f"\n{fails} check(s) FAILED: don't rely on this output; see the FAIL lines above"
         )
     print("\nAll checks passed.")
+    archived = ""
+    if args.archive:
+        dest, new = archive(source.bucket, run_id, args.vault, sizes, kit)
+        archived = f"{'Archived to' if new else 'Already archived in'} gs://{args.bucket}/{dest}"
+        print(archived)
     if env("CLOUD_RUN_JOB"):
-        log_success(run_id, args.vault, kit.counts)
+        log_success(run_id, args.vault, kit.counts, archived)
 
 
-def log_success(run_id, vault, counts):
+def log_success(run_id, vault, counts, archived=""):
     """One JSON line for the monthly "exit kit OK" email (alerts/exit-kit-summary.json).
 
     Only in Cloud Run (which sets CLOUD_RUN_JOB): a JSON line on stdout becomes a
@@ -814,7 +945,9 @@ def log_success(run_id, vault, counts):
     rows = "\n".join(f"| {what} | {n:,} |" for what, n in counts.items())
     summary = (
         f"Backup run {run_id} of vault {vault} converted to standard files; "
-        f"all checks passed.\n\n| Written | Count |\n|---|---:|\n{rows}"
+        f"all checks passed.\n\n"
+        + (f"{archived} (kept 13 months).\n\n" if archived else "")
+        + f"| Written | Count |\n|---|---:|\n{rows}"
     )
     entry = {
         "severity": "INFO",
